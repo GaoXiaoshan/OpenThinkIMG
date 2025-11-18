@@ -73,6 +73,7 @@ if is_wandb_available():
     import wandb
 import torch.nn as nn
 from torch.utils.data import Sampler
+from ._vllm_env import build_isolated_vllm_env
 
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
@@ -410,9 +411,18 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
                     return_value=None,
                 )
-                with world_size_patch, profiling_patch:
-                    print("vllm is running on: ", vllm_device)
-                    # breakpoint()
+                env_patch, user_port = build_isolated_vllm_env()
+                rendezvous_source = (
+                    "env(VLLM_MASTER_PORT)" if user_port else "auto-selected"
+                )
+                print(
+                    f"vllm is running on: {vllm_device} | rendezvous tcp://{env_patch['MASTER_ADDR']}:{env_patch['MASTER_PORT']} ({rendezvous_source})"
+                )
+                with (
+                    world_size_patch,
+                    profiling_patch,
+                    patch.dict(os.environ, env_patch, clear=False),
+                ):
                     self.llm = LLM(
                         model=model.name_or_path,
                         gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
@@ -428,30 +438,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                             else None
                         ),
                     )
-                    # breakpoint()
-                    # self.llm = LLM(
-                    #     model=model.name_or_path,
-                    #     device=vllm_device,
-                    #     gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
-                    #     dtype=torch.bfloat16,
-                    #     # enable_chunked_prefill=False,
-                    #     # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-                    #     # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-                    #     # This is particularly useful here because we generate completions from the same prompts.
-                    #     # enable_prefix_caching=True,
-                    #     enforce_eager=True,
-                    #     # Ensure that training and inference use the same processor for images.
-                    #     mm_processor_kwargs=(
-                    #         {
-                    #             "max_pixels": max_pixels,
-                    #             "min_pixels": min_pixels,
-                    #         }
-                    #         if "Qwen2-VL" in model_id or "Qwen2.5-VL" in model_id
-                    #         else None
-                    #     ),
-                    #     # max_model_len=args.max_completion_length,
-                    # )
-                print("fucking world!")
+                print("vLLM initialization finished.")
                 self.sampling_params = SamplingParams(
                     temperature=args.temperature,
                     max_tokens=self.max_completion_length,

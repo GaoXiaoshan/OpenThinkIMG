@@ -77,6 +77,7 @@ if is_wandb_available():
 import torch.nn as nn
 from torch.utils.data import Sampler
 from .tool_generation import vllm_generate_with_tool_calls, parse_tool_config
+from ._vllm_env import build_isolated_vllm_env
 
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
@@ -458,8 +459,18 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
                     return_value=None,
                 )
-                with world_size_patch, profiling_patch:
-                    print("vllm is running on: ", vllm_device)
+                env_patch, user_port = build_isolated_vllm_env()
+                rendezvous_source = (
+                    "env(VLLM_MASTER_PORT)" if user_port else "auto-selected"
+                )
+                print(
+                    f"vllm is running on: {vllm_device} | rendezvous tcp://{env_patch['MASTER_ADDR']}:{env_patch['MASTER_PORT']} ({rendezvous_source})"
+                )
+                with (
+                    world_size_patch,
+                    profiling_patch,
+                    patch.dict(os.environ, env_patch, clear=False),
+                ):
                     self.llm = LLM(
                         model=model.name_or_path,
                         device=vllm_device,
