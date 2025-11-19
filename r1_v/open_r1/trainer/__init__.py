@@ -1,3 +1,7 @@
+from ._torch_triton_compat import ensure_torch_triton_compat
+
+ensure_torch_triton_compat()
+
 from .grpo_trainer import Qwen2VLGRPOTrainer
 from .vllm_grpo_trainer import Qwen2VLGRPOVLLMTrainer 
 from .tool_grpo_trainer import Qwen2VLGRPOTrainer as Qwen2VLGRPOToolTrainer
