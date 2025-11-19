@@ -19,6 +19,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 from PIL import Image
+import requests
 from datasets import load_dataset, load_from_disk
 from transformers import Qwen2VLForConditionalGeneration
 from transformers.trainer_utils import get_last_checkpoint
@@ -162,6 +163,28 @@ reward_funcs_registry = {
     "format": format_reward,
 }
 
+
+def ensure_tool_server_ready(controller_addr: str, timeout: float = 30.0) -> None:
+    if not controller_addr:
+        raise ValueError("当 `use_tool` 为 True 时必须提供 controller_addr。")
+    url = controller_addr.rstrip("/") + "/list_models"
+    try:
+        response = requests.post(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            f"无法连接到 tool server（{url}），请确认服务已启动并可访问。"
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"tool server 返回的 JSON 无效：{response.text}") from exc
+
+    if "models" not in payload:
+        raise RuntimeError(f"tool server 返回缺少 `models` 字段：{payload}")
+
+
 # SYSTEM_PROMPT = (
 #     "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant "
 #     "first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning "
@@ -207,6 +230,9 @@ def main(script_args, training_args, model_args):
 
     # Get reward functions
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
+
+    if script_args.use_tool:
+        ensure_tool_server_ready(script_args.controller_addr)
 
     # Load the dataset
     dataset = load_dataset('json', data_files=script_args.dataset_name)
