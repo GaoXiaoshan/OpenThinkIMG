@@ -526,8 +526,11 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             self._signature_columns = ["prompt"]
     
     # We need a custom sampler that samples the same prompt multiple times
-    def _get_train_sampler(self):
-        return RepeatRandomSampler(self.train_dataset, self.num_generations)
+    def _get_train_sampler(self, dataset=None):
+        dataset = dataset if dataset is not None else self.train_dataset
+        if dataset is None:
+            return None
+        return RepeatRandomSampler(dataset, self.num_generations)
 
     ## SU: for debug
     # We need a custom sampler that samples the same prompt multiple times
