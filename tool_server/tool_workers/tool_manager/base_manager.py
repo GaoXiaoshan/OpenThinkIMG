@@ -10,8 +10,9 @@ from contextlib import contextmanager
 logger = build_logger("tool_manager")
 
 class ToolManager(object):
-    def __init__(self, controller_url_location=None):
+    def __init__(self, controller_url_location=None, request_timeout: float = 30.0):
         self.controller_url_location = controller_url_location
+        self.request_timeout = request_timeout
         self.init_offline_tools()
         self.init_online_tools(self.controller_url_location)
         self.init_online_tool_addr_dict()
@@ -36,10 +37,16 @@ class ToolManager(object):
             self.controller_addr = self.controller_addr_location
 
         with self.disable_proxy():
-            if self.controller_addr is not None and isinstance(self.controller_addr,str):
-                ret = requests.post(self.controller_addr + "/refresh_all_workers")
+            if self.controller_addr is not None and isinstance(self.controller_addr, str):
+                ret = requests.post(
+                    self.controller_addr + "/refresh_all_workers",
+                    timeout=self.request_timeout,
+                )
                 if ret.status_code == 200:
-                    ret = requests.post(self.controller_addr + "/list_models")
+                    ret = requests.post(
+                        self.controller_addr + "/list_models",
+                        timeout=self.request_timeout,
+                    )
                     models = ret.json()["models"]
                     logger.info(f"Online Tools: {models}")
                     self.available_online_tools = models
@@ -62,8 +69,11 @@ class ToolManager(object):
         self.online_tool_addr_dict = {}
         for model_name in self.available_online_tools:
             with self.disable_proxy():
-                ret = requests.post(self.controller_addr + "/get_worker_address",
-                                    json={"model": model_name})
+                ret = requests.post(
+                    self.controller_addr + "/get_worker_address",
+                    json={"model": model_name},
+                    timeout=self.request_timeout,
+                )
             worker_addr = ret.json()["address"]
             if worker_addr == "":
                 logger.error(f"worker_addr for {model_name} is empty")
@@ -86,7 +96,12 @@ class ToolManager(object):
             try:
                 tool_worker_addr = self.online_tool_addr_dict[tool_name]
                 with self.disable_proxy():
-                    ret = requests.post(tool_worker_addr + "/worker_generate",headers=self.headers,json=params)
+                    ret = requests.post(
+                        tool_worker_addr + "/worker_generate",
+                        headers=self.headers,
+                        json=params,
+                        timeout=self.request_timeout,
+                    )
                 return ret.json()
             except Exception as e:
                 logger.error(f"Failed to call tool {tool_name}: {e}")
