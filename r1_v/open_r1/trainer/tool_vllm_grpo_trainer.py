@@ -618,6 +618,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     )
                     llm_model.load_weights(state_dict.items())
                 self._last_loaded_step = self.state.global_step
+                
+                # Synchronize all processes after weight loading
+                self.accelerator.wait_for_everyone()
+            
+            # Synchronize all processes before gather_object to prevent hang
+            self.accelerator.wait_for_everyone()
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
             all_prompts_text = gather_object(prompts_text)
