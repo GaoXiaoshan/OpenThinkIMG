@@ -764,11 +764,27 @@ def vllm_generate_with_tool_calls(
 
     # breakpoint()    
     ## Vllm inference with tool calling
-    for _ in range(max_rounds):
+    import time
+    total_start_time = time.time()
+    max_total_time = 1500  # 25分钟总超时（给broadcast留5分钟）
+    
+    for round_idx in range(max_rounds):
+        # 检查总时间
+        elapsed = time.time() - total_start_time
+        if elapsed > max_total_time:
+            print(f"⚠️ 总时间超过 {max_total_time}秒，提前终止")
+            break
+        
+        print(f"\n{'='*60}")
+        print(f"🔄 Round {round_idx + 1}/{max_rounds} (已用时: {elapsed:.1f}秒)")
+        print(f"{'='*60}")
         input_conversations = [item["conversations"] for item in input_data if item["status"] == "processing"]
         input_idxs = [idx for idx, item in enumerate(input_data) if item["status"] == "processing"]
         try:
             # breakpoint()
+            round_start = time.time()
+            print(f"📝 开始VLLM生成 ({len(input_conversations)} 个对话)...")
+            
             outputs = vllm_model.chat(
                 input_conversations,
                 sampling_params = sampling_params,
@@ -776,9 +792,11 @@ def vllm_generate_with_tool_calls(
             )
             output_texts = [output.outputs[0].text for output in outputs]
             output_idss = [output.outputs[0].token_ids for output in outputs]
+            
+            print(f"✅ VLLM生成完成，耗时: {time.time() - round_start:.1f}秒")
         except Exception as e:
             # breakpoint()
-            print(f"[vllm generation] {e}")
+            print(f"❌ [vllm generation] {e}")
             output_texts = ["Model generation error"] * len(input_conversations)
             output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
             
@@ -823,13 +841,21 @@ def vllm_generate_with_tool_calls(
                 #     input_data[input_idx]["status"] = "finished"
                 #     continue
                 
-                # print(f"Tool calling: {api_name}")
                 # Call the tool using the tool manager
                 # breakpoint()
                 if "param" in api_params:
                     p = api_params["param"]
-                    print(f"Tool name: {api_name}, params: {p}")
-                tool_result = tool_manager.call_tool(api_name, api_params)
+                    print(f"🔧 调用工具: {api_name}, params: {p}")
+                else:
+                    print(f"🔧 调用工具: {api_name}")
+                
+                tool_start = time.time()
+                try:
+                    tool_result = tool_manager.call_tool(api_name, api_params)
+                    print(f"✅ 工具调用成功，耗时: {time.time() - tool_start:.2f}秒")
+                except Exception as e:
+                    print(f"❌ 工具调用失败: {e}")
+                    tool_result = {"error": str(e)}
                 # Append the tool call output to the conversation history
                 input_data[input_idx]["tool_outputs"].append(tool_result)
                 # Process the tool result and update the conversation
@@ -843,6 +869,11 @@ def vllm_generate_with_tool_calls(
                 )
 
     output_ids = [item["model_output_ids"][-1] for item in input_data]
+    
+    total_time = time.time() - total_start_time
+    print(f"\n{'='*60}")
+    print(f"🏁 所有轮次完成，总耗时: {total_time:.1f}秒 ({total_time/60:.1f}分钟)")
+    print(f"{'='*60}\n")
 
     return input_data
 

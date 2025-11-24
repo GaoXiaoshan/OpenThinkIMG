@@ -727,7 +727,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     prompts = all_prompts,
                     images = all_images,
                     sampling_params = self.sampling_params,
-                    max_rounds = 6,
+                    max_rounds = 3,  # 从6改为3，减少超时风险
                     model_mode = "general",
                     controller_addr = self.controller_addr,
                 )
