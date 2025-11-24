@@ -814,7 +814,18 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 completion_ids...")
             sys.stdout.flush()
             
-            completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            # 使用自定义的tensor-based broadcast替代默认的broadcast_object_list
+            # 因为默认的可能导致超时
+            if self.accelerator.is_main_process:
+                broadcast_completion_ids = completion_ids
+            else:
+                broadcast_completion_ids = [None] * len(all_prompts_text)
+            
+            # 使用gather+展平实现broadcast效果
+            gathered_completion_ids = self.gather_objects_via_tensors(broadcast_completion_ids)
+            if isinstance(gathered_completion_ids, list) and len(gathered_completion_ids) > 0:
+                # 主进程的数据在gathered_completion_ids[0]
+                completion_ids = gathered_completion_ids[0] if gathered_completion_ids[0] is not None else completion_ids
             
             print(f"✅ [Rank {self.accelerator.process_index}] completion_ids 广播完成")
             sys.stdout.flush()
@@ -822,7 +833,15 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 model_output_texts...")
             sys.stdout.flush()
             
-            model_output_texts = broadcast_object_list(model_output_texts, from_process=0)
+            # 同样处理model_output_texts
+            if self.accelerator.is_main_process:
+                broadcast_texts = model_output_texts
+            else:
+                broadcast_texts = [None] * len(all_prompts_text)
+            
+            gathered_texts = self.gather_objects_via_tensors(broadcast_texts)
+            if isinstance(gathered_texts, list) and len(gathered_texts) > 0:
+                model_output_texts = gathered_texts[0] if gathered_texts[0] is not None else model_output_texts
             
             print(f"✅ [Rank {self.accelerator.process_index}] model_output_texts 广播完成")
             sys.stdout.flush()
