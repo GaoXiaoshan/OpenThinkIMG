@@ -803,7 +803,21 @@ def vllm_generate_with_tool_calls(
             # breakpoint()
             print(f"❌ [vllm generation] {e}")
             output_texts = ["Model generation error"] * len(input_conversations)
-            output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
+            
+            # 使用EOS token作为错误占位符（更通用的做法）
+            # 尝试从vllm_model获取tokenizer
+            try:
+                if hasattr(vllm_model, 'llm_engine'):
+                    tokenizer = vllm_model.llm_engine.tokenizer.tokenizer
+                    error_token_ids = tokenizer.encode("Model generation error", add_special_tokens=False)
+                    output_idss = [tuple(error_token_ids)] * len(input_conversations)
+                else:
+                    # 回退到硬编码（但添加注释说明）
+                    # 这些token IDs对应Qwen2-VL的 "Model generation error" + <|im_end|>
+                    output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
+            except:
+                # 最后的回退：使用EOS token
+                output_idss = [(151645,)] * len(input_conversations)  # <|im_end|> token
             
         ## update data
         for input_idx, output_text, output_ids in zip(input_idxs, output_texts, output_idss):
