@@ -531,6 +531,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # Instead, we set them to the columns expec                                             ted by the `training_step` method, hence the override.
         if self._signature_columns is None:
             self._signature_columns = ["prompt"]
+        
+        # 验证初始化时的padding_side设置
+        print("\n" + "="*80)
+        print("【Trainer初始化完成 - 验证padding_side设置】")
+        print("="*80)
+        if hasattr(self.processing_class, 'tokenizer'):
+            current_padding = self.processing_class.tokenizer.padding_side
+            print(f"processing_class.tokenizer.padding_side = '{current_padding}'")
+            if current_padding != 'left':
+                print(f"⚠️ 警告：padding_side是'{current_padding}'，不是'left'！")
+        else:
+            print("⚠️ processing_class没有tokenizer属性")
+        print("="*80 + "\n")
     
     # We need a custom sampler that samples the same prompt multiple times
     def _get_train_sampler(self):
