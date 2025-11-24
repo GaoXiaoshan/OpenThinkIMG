@@ -808,17 +808,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     if idx == 0:
                         print(f"⚠️ Prompt样本{idx}检测到RIGHT padding（第一个PAD在位置{first_pad_idx}），正在转换...")
                     
-                    valid_length = mask.sum().item()
-                    pad_length = len(mask) - valid_length
-                    
+                    # 保持原始长度不变
+                    original_length = len(ids)
                     content_ids = ids[:first_pad_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
+                    
                     pad_token = self.processing_class.tokenizer.pad_token_id
-                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
                     new_ids = torch.cat([padding_ids, content_ids], dim=0)
                     
                     new_mask = torch.cat([
-                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                        torch.ones(first_pad_idx, dtype=mask.dtype, device=mask.device),
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
                     ], dim=0)
                     
                     new_prompt_ids.append(new_ids)
@@ -1125,20 +1127,20 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     if idx == 0:  # 只打印第1个需要转换的样本
                         print(f"⚠️ 样本{idx}检测到非LEFT padding（第一个0在位置{first_zero_idx}），正在转换...")
                     
-                    valid_length = mask.sum().item()
-                    pad_length = len(mask) - valid_length
-                    
-                    # 提取从开始到第一个0之前的内容
+                    # 保持原始长度不变
+                    original_length = len(ids)
                     content_ids = ids[:first_zero_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
                     
                     # 创建left padding
                     pad_token = self.processing_class.pad_token_id
-                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
                     new_id = torch.cat([padding_ids, content_ids], dim=0)
                     
                     new_m = torch.cat([
-                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                        torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
                     ], dim=0)
                     
                     new_ids.append(new_id)
@@ -1263,16 +1265,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                 if idx == 0:
                                     print(f"⚠️ [Reward Model] 样本{idx}检测到RIGHT padding，正在转换...")
                                 
-                                valid_length = mask.sum().item()
-                                pad_length = len(mask) - valid_length
+                                # 保持原始长度不变
+                                original_length = len(ids)
                                 content_ids = ids[:first_pad_idx]
+                                content_length = len(content_ids)
+                                padding_needed = original_length - content_length
+                                
                                 pad_token = reward_processing_class.tokenizer.pad_token_id
-                                padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
+                                padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype)
                                 new_ids = torch.cat([padding_ids, content_ids], dim=0)
                                 
                                 new_mask = torch.cat([
-                                    torch.zeros(pad_length, dtype=mask.dtype),
-                                    torch.ones(first_pad_idx, dtype=mask.dtype),
+                                    torch.zeros(padding_needed, dtype=mask.dtype),
+                                    torch.ones(content_length, dtype=mask.dtype),
                                 ], dim=0)
                                 
                                 new_reward_ids.append(new_ids)
@@ -1399,16 +1404,18 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     if idx == 0:
                         print(f"⚠️ [compute_loss] 样本{idx}检测到非LEFT padding，正在转换...")
                     
-                    valid_length = mask.sum().item()
-                    pad_length = len(mask) - valid_length
-                    
+                    # 保持原始长度不变
+                    original_length = len(ids)
                     content_ids = ids[:first_zero_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
+                    
                     pad_token = self.processing_class.pad_token_id
-                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
                     new_id = torch.cat([padding_ids, content_ids], dim=0)
                     new_m = torch.cat([
-                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                        torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
                     ], dim=0)
                     
                     new_ids.append(new_id)
