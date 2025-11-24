@@ -696,7 +696,6 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 world_size = len(all_prompts_text)
                 samples_per_gpu = len(all_prompts_text[0])
                 print(f"ℹ️ 展平gathered数据: {world_size} 个GPU, 每个GPU {samples_per_gpu} 个输入")
-                print(f"   （包含重复：{samples_per_gpu // num_generations} 个unique样本 × {num_generations} 次重复）")
                 
                 all_prompts_text = [item for sublist in all_prompts_text for item in sublist]
                 all_prompts = [item for sublist in all_prompts for item in sublist]
