@@ -570,25 +570,34 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         print(f"   attention_mask shape: {attention_mask.shape}")
         
         # 检查每个样本的padding模式
+        has_right_padding = False
         for i in range(min(2, attention_mask.shape[0])):  # 检查前2个样本
             mask = attention_mask[i]
             has_padding = (mask == 0).any()
             if has_padding:
                 first_one = (mask == 1).nonzero(as_tuple=True)[0][0].item()
                 last_one = (mask == 1).nonzero(as_tuple=True)[0][-1].item()
-                first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item() if (mask == 0).any() else -1
+                first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item()
                 
-                if first_one == 0:
-                    print(f"   ⚠️ 样本{i}: RIGHT/MIXED padding detected")
+                # RIGHT/MIXED padding: 第一个是1且存在0在1后面
+                if first_one == 0 and first_zero > first_one:
+                    print(f"   ⚠️ 样本{i}: RIGHT/MIXED padding detected!")
                     print(f"      前10个: {mask[:10].tolist()}")
                     print(f"      后10个: {mask[-10:].tolist()}")
                     print(f"      第一个1的位置: {first_one}, 最后一个1的位置: {last_one}, 第一个0的位置: {first_zero}")
+                    has_right_padding = True
                 else:
-                    print(f"   ✅ 样本{i}: LEFT padding")
+                    print(f"   ✅ 样本{i}: LEFT padding (0在前，1在后)")
                     print(f"      前10个: {mask[:10].tolist()}")
                     print(f"      后10个: {mask[-10:].tolist()}")
             else:
                 print(f"   ℹ️ 样本{i}: 无padding（全是有效token）")
+        
+        if has_right_padding:
+            raise ValueError(
+                "检测到RIGHT或MIXED padding！这不应该发生，说明之前的转换逻辑有问题。"
+                f"\n请检查 prompt+completion 拼接处的转换代码。"
+            )
         
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
@@ -1228,6 +1237,41 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         )
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        
+        # 🔧 [compute_loss] 关键修复：拼接后转换为LEFT padding
+        print(f"🔍 [compute_loss] 拼接后检查: input_ids shape = {input_ids.shape}")
+        if attention_mask[0, 0] == 1 and (attention_mask[0] == 0).any():
+            first_zero = (attention_mask[0] == 0).nonzero(as_tuple=True)[0]
+            if len(first_zero) > 0 and first_zero[0] > 0:
+                print(f"⚠️ [compute_loss] 检测到非LEFT padding，正在转换...")
+                new_ids = []
+                new_mask = []
+                for ids, mask in zip(input_ids, attention_mask):
+                    valid_length = mask.sum().item()
+                    pad_length = len(mask) - valid_length
+                    
+                    if pad_length > 0:
+                        valid_indices = (mask == 1).nonzero(as_tuple=True)[0]
+                        content_ids = ids[valid_indices]
+                        
+                        pad_token = self.processing_class.pad_token_id
+                        padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                        new_id = torch.cat([padding_ids, content_ids], dim=0)
+                        new_m = torch.cat([
+                            torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
+                            torch.ones(valid_length, dtype=mask.dtype, device=mask.device),
+                        ], dim=0)
+                    else:
+                        new_id = ids
+                        new_m = mask
+                    
+                    new_ids.append(new_id)
+                    new_mask.append(new_m)
+                
+                input_ids = torch.stack(new_ids)
+                attention_mask = torch.stack(new_mask)
+                print(f"✅ [compute_loss] 转换完成")
+        
         pixel_values = inputs["pixel_values"].to(dtype=torch.bfloat16)
         image_grid_thw = inputs["image_grid_thw"]
         logits_to_keep = completion_ids.size(
