@@ -969,9 +969,23 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             completion_ids = [
                 torch.tensor(ids, device=device) for ids in completion_ids
             ]
-            completion_ids = pad(
-                completion_ids, padding_value=self.processing_class.pad_token_id
-            )
+            
+            # 🔧 自定义LEFT padding（trl的pad只支持right padding）
+            # completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)  # RIGHT padding
+            max_len = max(len(ids) for ids in completion_ids)
+            padded_completion_ids = []
+            for ids in completion_ids:
+                pad_len = max_len - len(ids)
+                if pad_len > 0:
+                    # LEFT padding: [PAD, PAD, ..., content]
+                    padding = torch.full((pad_len,), self.processing_class.pad_token_id, dtype=ids.dtype, device=ids.device)
+                    padded_ids = torch.cat([padding, ids], dim=0)
+                else:
+                    padded_ids = ids
+                padded_completion_ids.append(padded_ids)
+            completion_ids = torch.stack(padded_completion_ids)
+            print(f"✅ completion_ids使用LEFT padding: shape={completion_ids.shape}")
+            
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             raise ValueError("Only vLLM generation is supported in this version ")
@@ -979,15 +993,37 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # below are the same with yifan's code
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
+        is_pad = completion_ids == self.processing_class.pad_token_id
         device = self.accelerator.device
+        
+        # 🔧 修复：对于LEFT padding，需要排除前面的PAD token
+        # 找到第一个非PAD token的位置（即内容开始的位置）
+        sequence_indices = torch.arange(completion_ids.size(1), device=device).expand(
+            completion_ids.size(0), -1
+        )
+        
+        # 找到每个序列第一个非PAD的位置
+        has_pad = is_pad.any(dim=1)
+        content_start_idx = torch.zeros(completion_ids.size(0), dtype=torch.long, device=device)
+        if has_pad.any():
+            # 找到最后一个PAD的位置 + 1
+            for i in range(completion_ids.size(0)):
+                if has_pad[i]:
+                    pad_indices = (is_pad[i] == 1).nonzero(as_tuple=True)[0]
+                    if len(pad_indices) > 0:
+                        # 假设LEFT padding，所有PAD在前面连续
+                        content_start_idx[i] = pad_indices[-1] + 1
+        
+        # 找到EOS token的位置
         eos_idx = torch.full(
             (is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device
         )
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(
-            is_eos.size(0), -1
-        )
-        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+        
+        # completion_mask: 1表示有效内容（content_start到eos之间）
+        completion_mask = ((sequence_indices >= content_start_idx.unsqueeze(1)) & 
+                          (sequence_indices <= eos_idx.unsqueeze(1))).int()
+        print(f"✅ completion_mask已调整为LEFT padding兼容: shape={completion_mask.shape}")
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B*G, P+C)
