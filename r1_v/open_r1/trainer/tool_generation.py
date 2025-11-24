@@ -679,51 +679,58 @@ def vllm_generate_with_tool_calls(
     
     ## build data
     
-    # ===== 调试：检查传入的prompts和images =====
+    # ===== 修复：展平由于num_return_sequences导致的嵌套 =====
     import json
-    print("\n" + "="*80)
-    print("【vllm_generate_with_tool_calls 函数入口调试】")
-    print("="*80)
-    print(f"prompts 类型: {type(prompts)}")
-    print(f"prompts 长度: {len(prompts) if isinstance(prompts, list) else 'N/A'}")
-    print(f"images 类型: {type(images)}")
-    print(f"images 长度: {len(images) if isinstance(images, list) else 'N/A'}")
     
+    # 检查是否存在嵌套（由于多个生成候选导致）
     if isinstance(prompts, list) and len(prompts) > 0:
-        print(f"\n第一个prompt:")
-        print(f"  类型: {type(prompts[0])}")
-        print(f"  内容: {json.dumps(prompts[0], indent=2, ensure_ascii=False) if isinstance(prompts[0], (list, dict)) else str(prompts[0])[:200]}")
-        
         if isinstance(prompts[0], list) and len(prompts[0]) > 0:
-            print(f"\n  prompts[0][0] 类型: {type(prompts[0][0])}")
-            print(f"  prompts[0][0] 内容: {prompts[0][0]}")
+            # 检查是否是真正的嵌套（包含多个副本）
+            if isinstance(prompts[0][0], list):
+                # prompts[0] = [[prompt1], [prompt2]] 的情况
+                # 每个样本只取第一个副本
+                print("⚠️ 检测到prompts被嵌套（多个生成候选），正在展平...")
+                print(f"   原始prompts长度: {len(prompts)}, prompts[0]长度: {len(prompts[0])}")
+                prompts = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in prompts]
+                print(f"   展平后prompts长度: {len(prompts)}")
     
+    # 同样处理images
     if isinstance(images, list) and len(images) > 0:
-        print(f"\n第一个image:")
-        print(f"  类型: {type(images[0])}")
+        if isinstance(images[0], list) and len(images[0]) > 0:
+            print("⚠️ 检测到images被嵌套（多个生成候选），正在展平...")
+            print(f"   原始images长度: {len(images)}, images[0]长度: {len(images[0])}")
+            images = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in images]
+            print(f"   展平后images长度: {len(images)}")
+    
+    # 验证展平后的格式
+    print("\n" + "="*80)
+    print("【vllm_generate_with_tool_calls 数据验证】")
+    print("="*80)
+    print(f"prompts 长度: {len(prompts)}")
+    print(f"images 长度: {len(images)}")
+    if len(prompts) > 0:
+        print(f"prompts[0] 类型: {type(prompts[0])}")
+        if isinstance(prompts[0], list) and len(prompts[0]) > 0:
+            print(f"prompts[0][0] 类型: {type(prompts[0][0])}")
+            if isinstance(prompts[0][0], dict):
+                print(f"✅ 格式正确: prompts[0][0] 是字典")
+                print(f"   keys: {list(prompts[0][0].keys())}")
+            else:
+                print(f"❌ 格式错误: prompts[0][0] 应该是字典，实际是 {type(prompts[0][0])}")
+    if len(images) > 0:
+        print(f"images[0] 类型: {type(images[0])}")
         if hasattr(images[0], 'mode'):
-            print(f"  mode: {images[0].mode}, size: {images[0].size}")
+            print(f"✅ 格式正确: images[0] 是PIL图像, mode={images[0].mode}, size={images[0].size}")
+        else:
+            print(f"❌ 格式错误: images[0] 应该是PIL.Image")
     print("="*80 + "\n")
-    # ===== 调试结束 =====
+    # ===== 修复结束 =====
 
     
     input_data = []
 
     
     for idx, (prompt, image) in enumerate(zip(prompts, images)):
-        # ===== 调试：每个样本 =====
-        print(f"\n--- 处理第 {idx} 个样本 ---")
-        print(f"prompt 类型: {type(prompt)}")
-        if isinstance(prompt, list):
-            print(f"prompt 长度: {len(prompt)}")
-            if len(prompt) > 0:
-                print(f"prompt[0] 类型: {type(prompt[0])}")
-                print(f"prompt[0] 内容: {prompt[0]}")
-        else:
-            print(f"prompt 内容（前100字符）: {str(prompt)[:100]}")
-        print(f"image 类型: {type(image)}")
-        # ===== 调试结束 =====
-        
         current_image = image
         if current_image:
             if current_image.mode in ("RGBA", "LA", "P"):
@@ -731,10 +738,7 @@ def vllm_generate_with_tool_calls(
                     
         current_image_base64 = pil_to_base64(current_image)
         if isinstance(prompt, list):
-            for p_idx, p in enumerate(prompt):
-                # ===== 调试：检查p =====
-                print(f"  遍历 prompt[{p_idx}], 类型: {type(p)}, 内容: {p}")
-                # ===== 调试结束 =====
+            for p in prompt:
                 for c in p["content"]:
                     if c["type"] == "image":
                         c["type"] = "image_url"
