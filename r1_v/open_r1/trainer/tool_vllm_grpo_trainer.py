@@ -645,17 +645,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # 提取所有数据（保持重复，用于GRPO的多候选采样）
         prompts = [x["prompt"] for x in inputs]
         images = [x["image"] for x in inputs]
-        prompts_text = [
-            maybe_apply_chat_template(example, self.processing_class)["prompt"]
-            for example in inputs
-        ]
-        
-        # 调试信息
-        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
-        if num_generations > 1:
-            print(f"ℹ️ GRPO采样: {len(prompts)} 个输入（包含重复），num_generations={num_generations}")
-            print(f"   预期每 {num_generations} 个输入属于同一个样本的不同候选")
-        
+        # ⚠️ 关键：必须在任何tokenization之前就设置padding_side
         # 显式设置tokenizer的padding方向为left（Flash Attention要求）
         if hasattr(self.processing_class, 'tokenizer'):
             self.processing_class.tokenizer.padding_side = "left"
@@ -666,9 +656,20 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         
         # 验证设置
         actual_padding_side = getattr(self.processing_class.tokenizer, 'padding_side', 'unknown') if hasattr(self.processing_class, 'tokenizer') else 'no tokenizer'
-        print(f"📋 调用processor前验证: padding_side = '{actual_padding_side}'")
+        print(f"📋 Tokenization前验证: padding_side = '{actual_padding_side}'")
         if actual_padding_side == 'right':
-            raise ValueError(f"❌ padding_side仍然是'right'，设置失败！")
+            raise ValueError(f"❌ padding_side仍然是'right'，设置失败！请检查初始化代码")
+        
+        prompts_text = [
+            maybe_apply_chat_template(example, self.processing_class)["prompt"]
+            for example in inputs
+        ]
+        
+        # 调试信息
+        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
+        if num_generations > 1:
+            print(f"ℹ️ GRPO采样: {len(prompts)} 个输入（包含重复），num_generations={num_generations}")
+            print(f"   预期每 {num_generations} 个输入属于同一个样本的不同候选")
         
         prompt_inputs = self.processing_class(
             # prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
