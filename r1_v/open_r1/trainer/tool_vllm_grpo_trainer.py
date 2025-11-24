@@ -659,8 +659,16 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # 显式设置tokenizer的padding方向为left（Flash Attention要求）
         if hasattr(self.processing_class, 'tokenizer'):
             self.processing_class.tokenizer.padding_side = "left"
+            print(f"✅ 设置 tokenizer.padding_side = {self.processing_class.tokenizer.padding_side}")
         if hasattr(self.processing_class, 'padding_side'):
             self.processing_class.padding_side = "left"
+            print(f"✅ 设置 processing_class.padding_side = {self.processing_class.padding_side}")
+        
+        # 验证设置
+        actual_padding_side = getattr(self.processing_class.tokenizer, 'padding_side', 'unknown') if hasattr(self.processing_class, 'tokenizer') else 'no tokenizer'
+        print(f"📋 调用processor前验证: padding_side = '{actual_padding_side}'")
+        if actual_padding_side == 'right':
+            raise ValueError(f"❌ padding_side仍然是'right'，设置失败！")
         
         prompt_inputs = self.processing_class(
             # prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
