@@ -570,6 +570,64 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             per_token_logps.append(token_log_prob)
         return torch.stack(per_token_logps)
 
+    def gather_objects_via_tensors(self, obj):
+        """
+        使用张量通信来gather对象，避免使用默认的gather_object导致的卡顿问题
+        
+        Args:
+            obj: 要gather的对象（可以是任何可pickle的Python对象）
+            
+        Returns:
+            list: 所有进程的对象列表 [GPU0的对象, GPU1的对象, ...]
+        """
+        import pickle
+        import torch.distributed as dist
+        
+        if not dist.is_initialized():
+            return [obj]
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        backend = dist.get_backend()
+
+        # Use GPU tensors if backend is NCCL
+        use_gpu = backend.lower() == "nccl"
+
+        device = torch.device("cuda", rank % torch.cuda.device_count()) if use_gpu else torch.device("cpu")
+
+        # 1. Serialize
+        data_bytes = pickle.dumps(obj)
+        byte_tensor = torch.tensor(list(data_bytes), dtype=torch.uint8, device=device)
+
+        # 2. Gather sizes (must be same device as backend)
+        local_size = torch.tensor([byte_tensor.numel()], dtype=torch.long, device=device)
+
+        size_list = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+        dist.all_gather(size_list, local_size)
+
+        sizes = [int(s.item()) for s in size_list]
+        max_size = max(sizes)
+
+        # 3. Pad tensor to max size
+        if byte_tensor.numel() < max_size:
+            padding = torch.zeros(max_size - byte_tensor.numel(), dtype=torch.uint8, device=device)
+            byte_tensor = torch.cat([byte_tensor, padding], dim=0)
+
+        # 4. Allocate gather list
+        gather_list = [torch.zeros(max_size, dtype=torch.uint8, device=device)
+                    for _ in range(world_size)]
+
+        dist.all_gather(gather_list, byte_tensor)
+
+        # 5. Deserialize
+        results = []
+        for i in range(world_size):
+            real_size = sizes[i]
+            data_i = bytes(gather_list[i][:real_size].cpu().numpy().tolist())
+            results.append(pickle.loads(data_i))
+
+        return results
+
     # Trainer "prepares" the inputs before calling `compute_loss`. It converts to tensor and move to device.
     # Since we preprocess the data in `compute_loss`, we need to override this method to skip this step.
     def _prepare_inputs(
@@ -638,9 +696,20 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_prompts_text = gather_object(prompts_text)
-            all_prompts = gather_object(prompts)
-            all_images = gather_object(images)
+            all_prompts_text = self.gather_objects_via_tensors(prompts_text)
+            all_prompts = self.gather_objects_via_tensors(prompts)
+            all_images = self.gather_objects_via_tensors(images)
+            
+            # gather_objects_via_tensors 返回 [GPU0的数据, GPU1的数据, ...]
+            # 需要展平为一维列表
+            if isinstance(all_prompts_text, list) and len(all_prompts_text) > 0 and isinstance(all_prompts_text[0], list):
+                print(f"⚠️ 展平gathered数据: {len(all_prompts_text)} 个GPU, 每个GPU约 {len(all_prompts_text[0])} 个样本")
+                all_prompts_text = [item for sublist in all_prompts_text for item in sublist]
+                all_prompts = [item for sublist in all_prompts for item in sublist]
+                all_images = [item for sublist in all_images for item in sublist]
+                print(f"   展平后总计: {len(all_prompts)} 个样本")
+            else:
+                print(f"✅ gathered数据无需展平: {len(all_prompts)} 个样本")
             # group into pairs
             all_multimodal_inputs = [
                 {"prompt": p, "multi_modal_data": {"image": i}}
