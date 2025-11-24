@@ -266,13 +266,26 @@ def main(script_args, training_args, model_args):
 
     # breakpoint()
     
+    # 打印数据集信息
+    train_dataset = dataset[script_args.dataset_train_split]
+    print("\n" + "="*80)
+    print("【数据集信息】")
+    print("="*80)
+    print(f"训练集大小: {len(train_dataset)} 个样本")
+    print(f"训练集字段: {train_dataset.column_names}")
+    print(f"per_device_train_batch_size: {training_args.per_device_train_batch_size}")
+    print(f"num_return_sequences (生成候选数): {training_args.num_return_sequences if hasattr(training_args, 'num_return_sequences') else 'N/A'}")
+    print(f"gradient_accumulation_steps: {training_args.gradient_accumulation_steps}")
+    print(f"理论上每个GPU的输入数: {training_args.per_device_train_batch_size * (training_args.num_return_sequences if hasattr(training_args, 'num_return_sequences') else 1)}")
+    print("="*80 + "\n")
+    
     if script_args.use_tool:
         trainer_cls = Qwen2VLGRPOToolTrainer if not training_args.use_vllm else Qwen2VLGRPOToolVLLMTrainer
         trainer = trainer_cls(
             model=model_args.model_name_or_path,
             reward_funcs=reward_funcs,
             args=training_args,
-            train_dataset=dataset[script_args.dataset_train_split],
+            train_dataset=train_dataset,
             eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
             peft_config=get_peft_config(model_args),
             attn_implementation=model_args.attn_implementation,
@@ -286,7 +299,7 @@ def main(script_args, training_args, model_args):
             model=model_args.model_name_or_path,
             reward_funcs=reward_funcs,
             args=training_args,
-            train_dataset=dataset[script_args.dataset_train_split],
+            train_dataset=train_dataset,
             eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
             peft_config=get_peft_config(model_args),
             attn_implementation=model_args.attn_implementation,
