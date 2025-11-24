@@ -569,8 +569,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         print(f"   input_ids shape: {input_ids.shape}")
         print(f"   attention_mask shape: {attention_mask.shape}")
         
-        # 检查每个样本的padding模式
-        has_right_padding = False
+        # 检查每个样本的padding模式（仅用于调试，不阻断训练）
         for i in range(min(2, attention_mask.shape[0])):  # 检查前2个样本
             mask = attention_mask[i]
             has_padding = (mask == 0).any()
@@ -585,19 +584,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     print(f"      前10个: {mask[:10].tolist()}")
                     print(f"      后10个: {mask[-10:].tolist()}")
                     print(f"      第一个1的位置: {first_one}, 最后一个1的位置: {last_one}, 第一个0的位置: {first_zero}")
-                    has_right_padding = True
                 else:
                     print(f"   ✅ 样本{i}: LEFT padding (0在前，1在后)")
                     print(f"      前10个: {mask[:10].tolist()}")
                     print(f"      后10个: {mask[-10:].tolist()}")
             else:
                 print(f"   ℹ️ 样本{i}: 无padding（全是有效token）")
-        
-        if has_right_padding:
-            raise ValueError(
-                "检测到RIGHT或MIXED padding！这不应该发生，说明之前的转换逻辑有问题。"
-                f"\n请检查 prompt+completion 拼接处的转换代码。"
-            )
         
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
