@@ -795,9 +795,14 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 completion_ids = [None] * len(all_prompts_text)
                 model_output_texts = [None] * len(all_prompts_text)
                 print(f"ℹ️ [Rank {self.accelerator.process_index}] 非主进程else块结束")
+                sys.stdout.flush()
             
-            import sys
-            sys.stdout.flush()  # 强制刷新输出缓冲
+            # 所有进程都离开if/else块后，再次同步
+            print(f"🔄 [Rank {self.accelerator.process_index}] if/else块结束，准备同步...")
+            sys.stdout.flush()
+            self.accelerator.wait_for_everyone()
+            print(f"✅ [Rank {self.accelerator.process_index}] if/else块同步完成")
+            sys.stdout.flush()
             
             print(f"\n📡 [Rank {self.accelerator.process_index}] 开始广播数据到所有GPU...")
             sys.stdout.flush()
