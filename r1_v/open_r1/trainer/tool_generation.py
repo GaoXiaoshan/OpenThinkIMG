@@ -666,18 +666,19 @@ def vllm_generate_with_tool_calls(
     print(f"controller_addr: {controller_addr}")
     print(f"Available tools: {tool_manager.available_tools}")
     
-    # 只检查实际需要的工具（移除了Point和SegmentRegionAroundPoint）
-    required_tools = ["ZoomInSubfigure", "DrawHorizontalLineByY", "OCR", "DrawVerticalLineByX"]
-    miss_tool = []
-    for tool in required_tools:
-        if tool not in tool_manager.available_tools:
-            miss_tool.append(tool)
+    # 检查工具（区分在线和离线工具）
+    online_required = ["ZoomInSubfigure", "DrawHorizontalLineByY", "DrawVerticalLineByX"]
+    offline_tools = ["OCR"]  # OCR通常有本地实现
     
-    if len(miss_tool) == 0:
-        print(f"✅ 所有必需工具已加载: {required_tools}")
+    miss_online = [t for t in online_required if t not in tool_manager.available_tools]
+    
+    if len(miss_online) == 0:
+        print(f"✅ 所有在线工具已加载: {online_required}")
     else:
-        print(f"⚠️ 缺少工具: {miss_tool}")
-        print(f"   可用工具: {tool_manager.available_tools}")
+        print(f"⚠️ 缺少在线工具: {miss_online}")
+    
+    print(f"ℹ️  离线工具（本地实现）: {offline_tools}")
+    print(f"ℹ️  可用在线工具: {tool_manager.available_tools}")
 
     # image_tool_manager = ImageToolManager()
     # {"prompt": p, "multi_modal_data": {"image": i}}
