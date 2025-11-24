@@ -714,10 +714,48 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             padding_side="left",
             add_special_tokens=False,
         )
-        prompt_ids, prompt_mask = (
-            prompt_inputs["input_ids"].to(device),
-            prompt_inputs["attention_mask"].to(device),
-        )
+        
+        # 🔧 手动修复attention_mask：从right padding转换为left padding
+        prompt_ids = prompt_inputs["input_ids"]
+        prompt_mask = prompt_inputs["attention_mask"]
+        
+        # 检查是否是right padding（第一个token是1）
+        if prompt_mask[0, 0] == 1 and prompt_mask[0, -1] == 0:
+            print(f"⚠️ 检测到RIGHT padding，正在转换为LEFT padding...")
+            # 对每个序列进行转换
+            new_prompt_ids = []
+            new_prompt_mask = []
+            for ids, mask in zip(prompt_ids, prompt_mask):
+                # 找到有效内容（mask=1的部分）
+                valid_length = mask.sum().item()
+                pad_length = len(mask) - valid_length
+                
+                # RIGHT padding: [content..., PAD, PAD] -> LEFT padding: [PAD, PAD, content...]
+                # 提取有效内容（前valid_length个token）
+                content_ids = ids[:valid_length]
+                pad_token = ids[valid_length] if valid_length < len(ids) else self.processing_class.tokenizer.pad_token_id
+                
+                # 创建左padding
+                padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
+                new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                
+                # 创建左padding mask
+                new_mask = torch.cat([
+                    torch.zeros(pad_length, dtype=mask.dtype),  # padding mask (0)
+                    torch.ones(valid_length, dtype=mask.dtype),  # content mask (1)
+                ], dim=0)
+                
+                new_prompt_ids.append(new_ids)
+                new_prompt_mask.append(new_mask)
+            
+            prompt_ids = torch.stack(new_prompt_ids)
+            prompt_mask = torch.stack(new_prompt_mask)
+            print(f"✅ 转换完成：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+        else:
+            print(f"✅ 已经是LEFT padding：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+        
+        prompt_ids = prompt_ids.to(device)
+        prompt_mask = prompt_mask.to(device)
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
@@ -1017,6 +1055,37 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     padding_side="left",  # 修改为left，适配Flash Attention
                     add_special_tokens=False,
                 )
+                
+                # 🔧 手动修复reward model的attention_mask
+                if "attention_mask" in reward_inputs:
+                    reward_mask = reward_inputs["attention_mask"]
+                    reward_ids = reward_inputs["input_ids"]
+                    
+                    if reward_mask[0, 0] == 1 and reward_mask[0, -1] == 0:
+                        print(f"⚠️ [Reward Model] 检测到RIGHT padding，正在转换为LEFT padding...")
+                        new_reward_ids = []
+                        new_reward_mask = []
+                        for ids, mask in zip(reward_ids, reward_mask):
+                            valid_length = mask.sum().item()
+                            pad_length = len(mask) - valid_length
+                            
+                            content_ids = ids[:valid_length]
+                            pad_token = ids[valid_length] if valid_length < len(ids) else reward_processing_class.tokenizer.pad_token_id
+                            padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
+                            new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                            
+                            new_mask = torch.cat([
+                                torch.zeros(pad_length, dtype=mask.dtype),
+                                torch.ones(valid_length, dtype=mask.dtype),
+                            ], dim=0)
+                            
+                            new_reward_ids.append(new_ids)
+                            new_reward_mask.append(new_mask)
+                        
+                        reward_inputs["input_ids"] = torch.stack(new_reward_ids)
+                        reward_inputs["attention_mask"] = torch.stack(new_reward_mask)
+                        print(f"✅ [Reward Model] 转换完成")
+                
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
