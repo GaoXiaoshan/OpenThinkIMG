@@ -731,12 +731,15 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     model_mode = "general",
                     controller_addr = self.controller_addr,
                 )
-                # SU: for debug
+                
+                print(f"\n✅ vllm_generate_with_tool_calls 返回成功")
+                print(f"   返回了 {len(tool_generation_output)} 个结果")
+                
+                # SU: for debug（简化输出）
                 for i, output in enumerate(tool_generation_output):
-                    print(f"Output {i}:")
-                    print(f"Model Outputs: {output['model_outputs']}")
-                    print(f"Tool Outputs: {output['tool_outputs']}")
+                    print(f"样本 {i}: {len(output['model_outputs'])} 轮输出, {len(output['tool_outputs'])} 次工具调用")
 
+                print(f"\n📊 正在处理输出数据...")
                 model_output_texts = [item["model_outputs"] for item in tool_generation_output]
                 num = 0
                 for item in tool_generation_output:
@@ -746,19 +749,31 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 self._metrics["ave_tool_num"].append(ave_tool_num)
 
                 model_output_ids = []
-                for item in tool_generation_output:
+                print(f"📝 处理 {len(tool_generation_output)} 个样本的输出IDs...")
+                for idx, item in enumerate(tool_generation_output):
                     all_outputs = []
+                    num_output_ids = len(item["model_output_ids"])
+                    print(f"   样本{idx}: {num_output_ids} 个输出ID列表")
                     for model_output_id in item["model_output_ids"]:
                         all_outputs.extend(model_output_id)
                     model_output_ids.append(all_outputs)
+                    print(f"   样本{idx}: 合并后共 {len(all_outputs)} 个tokens")
                 # completion_ids = [list(item["model_output_ids"]) for item in tool_generation_output]
                 completion_ids = [completion_list[:self.max_completion_length] for completion_list in model_output_ids]
+                print(f"✅ 数据处理完成，准备广播")
             else:
                 completion_ids = [None] * len(all_prompts_text)
                 model_output_texts = [None] * len(all_prompts_text)
             
+            print(f"\n📡 开始广播数据到所有GPU...")
+            print(f"   completion_ids: {len(completion_ids)} 个")
+            print(f"   model_output_texts: {len(model_output_texts)} 个")
+            
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            print(f"✅ completion_ids 广播完成")
+            
             model_output_texts = broadcast_object_list(model_output_texts, from_process=0)
+            print(f"✅ model_output_texts 广播完成")
             process_slice = slice(
                 self.accelerator.process_index * len(prompts),
                 (self.accelerator.process_index + 1) * len(prompts),

@@ -895,11 +895,26 @@ def vllm_generate_with_tool_calls(
                     input_data_item = input_data[input_idx]
                 )
 
-    output_ids = [item["model_output_ids"][-1] for item in input_data]
+    # 收集输出IDs（添加错误处理）
+    print(f"\n📊 正在收集输出数据...")
+    output_ids = []
+    for idx, item in enumerate(input_data):
+        try:
+            if len(item["model_output_ids"]) > 0:
+                output_ids.append(item["model_output_ids"][-1])
+            else:
+                print(f"⚠️ 样本 {idx} 没有输出IDs，使用空列表")
+                output_ids.append([])
+        except Exception as e:
+            print(f"❌ 处理样本 {idx} 时出错: {e}")
+            output_ids.append([])
+    
+    print(f"✅ 收集了 {len(output_ids)} 个输出")
     
     total_time = time.time() - total_start_time
     print(f"\n{'='*60}")
     print(f"🏁 所有轮次完成，总耗时: {total_time:.1f}秒 ({total_time/60:.1f}分钟)")
+    print(f"   处理了 {len(input_data)} 个样本")
     print(f"{'='*60}\n")
 
     return input_data
