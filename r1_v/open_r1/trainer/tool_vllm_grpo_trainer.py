@@ -576,11 +576,29 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        prompts = [x["prompt"] for x in inputs]
-        images = [x["image"] for x in inputs]
+        
+        # GRPO训练中，每个样本会重复num_return_sequences次用于生成多个候选
+        # 我们需要去重，只保留unique的样本
+        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
+        
+        # 提取所有数据
+        all_prompts = [x["prompt"] for x in inputs]
+        all_images = [x["image"] for x in inputs]
+        
+        # 去重：每num_generations个取一个
+        if num_generations > 1:
+            prompts = all_prompts[::num_generations]
+            images = all_images[::num_generations]
+            print(f"⚠️ 检测到num_return_sequences={num_generations}，去重前: {len(all_prompts)} 个样本，去重后: {len(prompts)} 个样本")
+        else:
+            prompts = all_prompts
+            images = all_images
+        
+        # 生成prompts_text时也使用去重后的inputs
+        unique_inputs = [inputs[i] for i in range(0, len(inputs), num_generations)] if num_generations > 1 else inputs
         prompts_text = [
             maybe_apply_chat_template(example, self.processing_class)["prompt"]
-            for example in inputs
+            for example in unique_inputs
         ]
         
         prompt_inputs = self.processing_class(
