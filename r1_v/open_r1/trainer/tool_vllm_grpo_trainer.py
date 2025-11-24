@@ -761,19 +761,43 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 # completion_ids = [list(item["model_output_ids"]) for item in tool_generation_output]
                 completion_ids = [completion_list[:self.max_completion_length] for completion_list in model_output_ids]
                 print(f"✅ 数据处理完成，准备广播")
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 主进程if块即将结束")
             else:
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 非主进程进入else块")
                 completion_ids = [None] * len(all_prompts_text)
                 model_output_texts = [None] * len(all_prompts_text)
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 非主进程else块结束")
             
-            print(f"\n📡 开始广播数据到所有GPU...")
-            print(f"   completion_ids: {len(completion_ids)} 个")
-            print(f"   model_output_texts: {len(model_output_texts)} 个")
+            import sys
+            sys.stdout.flush()  # 强制刷新输出缓冲
+            
+            print(f"\n📡 [Rank {self.accelerator.process_index}] 开始广播数据到所有GPU...")
+            sys.stdout.flush()
+            
+            try:
+                comp_len = len(completion_ids) if completion_ids else 0
+                text_len = len(model_output_texts) if model_output_texts else 0
+                print(f"   completion_ids: {comp_len} 个")
+                print(f"   model_output_texts: {text_len} 个")
+            except Exception as e:
+                print(f"   ⚠️ 获取长度时出错: {e}")
+            sys.stdout.flush()
+            
+            print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 completion_ids...")
+            sys.stdout.flush()
             
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
-            print(f"✅ completion_ids 广播完成")
+            
+            print(f"✅ [Rank {self.accelerator.process_index}] completion_ids 广播完成")
+            sys.stdout.flush()
+            
+            print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 model_output_texts...")
+            sys.stdout.flush()
             
             model_output_texts = broadcast_object_list(model_output_texts, from_process=0)
-            print(f"✅ model_output_texts 广播完成")
+            
+            print(f"✅ [Rank {self.accelerator.process_index}] model_output_texts 广播完成")
+            sys.stdout.flush()
             process_slice = slice(
                 self.accelerator.process_index * len(prompts),
                 (self.accelerator.process_index + 1) * len(prompts),
