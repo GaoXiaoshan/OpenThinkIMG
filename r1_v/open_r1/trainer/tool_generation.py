@@ -679,52 +679,37 @@ def vllm_generate_with_tool_calls(
     
     ## build data
     
-    # ===== 修复：展平由于num_return_sequences导致的嵌套 =====
+    # ===== 数据格式验证（仅调试，不修改数据） =====
     import json
     
-    # 检查是否存在嵌套（由于多个生成候选导致）
-    if isinstance(prompts, list) and len(prompts) > 0:
-        if isinstance(prompts[0], list) and len(prompts[0]) > 0:
-            # 检查是否是真正的嵌套（包含多个副本）
-            if isinstance(prompts[0][0], list):
-                # prompts[0] = [[prompt1], [prompt2]] 的情况
-                # 每个样本只取第一个副本
-                print("⚠️ 检测到prompts被嵌套（多个生成候选），正在展平...")
-                print(f"   原始prompts长度: {len(prompts)}, prompts[0]长度: {len(prompts[0])}")
-                prompts = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in prompts]
-                print(f"   展平后prompts长度: {len(prompts)}")
-    
-    # 同样处理images
-    if isinstance(images, list) and len(images) > 0:
-        if isinstance(images[0], list) and len(images[0]) > 0:
-            print("⚠️ 检测到images被嵌套（多个生成候选），正在展平...")
-            print(f"   原始images长度: {len(images)}, images[0]长度: {len(images[0])}")
-            images = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in images]
-            print(f"   展平后images长度: {len(images)}")
-    
-    # 验证展平后的格式
     print("\n" + "="*80)
-    print("【vllm_generate_with_tool_calls 数据验证】")
+    print("【vllm_generate_with_tool_calls 输入数据】")
     print("="*80)
-    print(f"prompts 长度: {len(prompts)}")
-    print(f"images 长度: {len(images)}")
+    print(f"prompts 数量: {len(prompts)}")
+    print(f"images 数量: {len(images)}")
+    
     if len(prompts) > 0:
-        print(f"prompts[0] 类型: {type(prompts[0])}")
+        print(f"\n第一个prompt结构:")
+        print(f"  类型: {type(prompts[0])}")
         if isinstance(prompts[0], list) and len(prompts[0]) > 0:
-            print(f"prompts[0][0] 类型: {type(prompts[0][0])}")
+            print(f"  长度: {len(prompts[0])}")
+            print(f"  prompts[0][0] 类型: {type(prompts[0][0])}")
             if isinstance(prompts[0][0], dict):
-                print(f"✅ 格式正确: prompts[0][0] 是字典")
-                print(f"   keys: {list(prompts[0][0].keys())}")
+                print(f"  ✅ 格式正确: prompts[0][0] 是字典")
+                print(f"     keys: {list(prompts[0][0].keys())}")
             else:
-                print(f"❌ 格式错误: prompts[0][0] 应该是字典，实际是 {type(prompts[0][0])}")
+                print(f"  ❌ 格式错误: prompts[0][0] 应该是字典，实际是 {type(prompts[0][0])}")
+    
     if len(images) > 0:
-        print(f"images[0] 类型: {type(images[0])}")
+        print(f"\n第一个image:")
+        print(f"  类型: {type(images[0])}")
         if hasattr(images[0], 'mode'):
-            print(f"✅ 格式正确: images[0] 是PIL图像, mode={images[0].mode}, size={images[0].size}")
+            print(f"  ✅ 格式正确: PIL图像, mode={images[0].mode}, size={images[0].size}")
         else:
-            print(f"❌ 格式错误: images[0] 应该是PIL.Image")
+            print(f"  ❌ 格式错误: 应该是PIL.Image")
+    
     print("="*80 + "\n")
-    # ===== 修复结束 =====
+    # ===== 验证结束 =====
 
     
     input_data = []

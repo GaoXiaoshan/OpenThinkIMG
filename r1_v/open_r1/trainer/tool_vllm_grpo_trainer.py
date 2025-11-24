@@ -635,29 +635,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         
-        # GRPO训练中，每个样本会重复num_return_sequences次用于生成多个候选
-        # 我们需要去重，只保留unique的样本
-        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
-        
-        # 提取所有数据
-        all_prompts = [x["prompt"] for x in inputs]
-        all_images = [x["image"] for x in inputs]
-        
-        # 去重：每num_generations个取一个
-        if num_generations > 1:
-            prompts = all_prompts[::num_generations]
-            images = all_images[::num_generations]
-            print(f"⚠️ 检测到num_return_sequences={num_generations}，去重前: {len(all_prompts)} 个样本，去重后: {len(prompts)} 个样本")
-        else:
-            prompts = all_prompts
-            images = all_images
-        
-        # 生成prompts_text时也使用去重后的inputs
-        unique_inputs = [inputs[i] for i in range(0, len(inputs), num_generations)] if num_generations > 1 else inputs
+        # 提取所有数据（保持重复，用于GRPO的多候选采样）
+        prompts = [x["prompt"] for x in inputs]
+        images = [x["image"] for x in inputs]
         prompts_text = [
             maybe_apply_chat_template(example, self.processing_class)["prompt"]
-            for example in unique_inputs
+            for example in inputs
         ]
+        
+        # 调试信息
+        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
+        if num_generations > 1:
+            print(f"ℹ️ GRPO采样: {len(prompts)} 个输入（包含重复），num_generations={num_generations}")
+            print(f"   预期每 {num_generations} 个输入属于同一个样本的不同候选")
         
         prompt_inputs = self.processing_class(
             # prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
@@ -703,13 +693,20 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             # gather_objects_via_tensors 返回 [GPU0的数据, GPU1的数据, ...]
             # 需要展平为一维列表
             if isinstance(all_prompts_text, list) and len(all_prompts_text) > 0 and isinstance(all_prompts_text[0], list):
-                print(f"⚠️ 展平gathered数据: {len(all_prompts_text)} 个GPU, 每个GPU约 {len(all_prompts_text[0])} 个样本")
+                world_size = len(all_prompts_text)
+                samples_per_gpu = len(all_prompts_text[0])
+                print(f"ℹ️ 展平gathered数据: {world_size} 个GPU, 每个GPU {samples_per_gpu} 个输入")
+                print(f"   （包含重复：{samples_per_gpu // num_generations} 个unique样本 × {num_generations} 次重复）")
+                
                 all_prompts_text = [item for sublist in all_prompts_text for item in sublist]
                 all_prompts = [item for sublist in all_prompts for item in sublist]
                 all_images = [item for sublist in all_images for item in sublist]
-                print(f"   展平后总计: {len(all_prompts)} 个样本")
+                
+                total_inputs = len(all_prompts)
+                unique_samples = total_inputs // num_generations
+                print(f"   展平后: {total_inputs} 个输入 = {unique_samples} 个unique样本 × {num_generations} 次候选")
             else:
-                print(f"✅ gathered数据无需展平: {len(all_prompts)} 个样本")
+                print(f"ℹ️ Gathered数据无需展平: {len(all_prompts)} 个输入")
             # group into pairs
             all_multimodal_inputs = [
                 {"prompt": p, "multi_modal_data": {"image": i}}
