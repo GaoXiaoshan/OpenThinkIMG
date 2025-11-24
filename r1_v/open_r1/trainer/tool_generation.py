@@ -193,6 +193,8 @@ def parse_tool_config(
             
         except Exception as e:
             print(f"Error extracting actions list: {e}")
+            # 可选：显示导致错误的内容（前200字符）
+            # print(f"  Failed content: {actions_str[:200] if 'actions_str' in locals() else text[:200]}")
             return None
     
     if not model_response:
