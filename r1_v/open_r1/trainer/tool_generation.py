@@ -678,12 +678,52 @@ def vllm_generate_with_tool_calls(
     # {"prompt": p, "multi_modal_data": {"image": i}}
     
     ## build data
+    
+    # ===== 调试：检查传入的prompts和images =====
+    import json
+    print("\n" + "="*80)
+    print("【vllm_generate_with_tool_calls 函数入口调试】")
+    print("="*80)
+    print(f"prompts 类型: {type(prompts)}")
+    print(f"prompts 长度: {len(prompts) if isinstance(prompts, list) else 'N/A'}")
+    print(f"images 类型: {type(images)}")
+    print(f"images 长度: {len(images) if isinstance(images, list) else 'N/A'}")
+    
+    if isinstance(prompts, list) and len(prompts) > 0:
+        print(f"\n第一个prompt:")
+        print(f"  类型: {type(prompts[0])}")
+        print(f"  内容: {json.dumps(prompts[0], indent=2, ensure_ascii=False) if isinstance(prompts[0], (list, dict)) else str(prompts[0])[:200]}")
+        
+        if isinstance(prompts[0], list) and len(prompts[0]) > 0:
+            print(f"\n  prompts[0][0] 类型: {type(prompts[0][0])}")
+            print(f"  prompts[0][0] 内容: {prompts[0][0]}")
+    
+    if isinstance(images, list) and len(images) > 0:
+        print(f"\n第一个image:")
+        print(f"  类型: {type(images[0])}")
+        if hasattr(images[0], 'mode'):
+            print(f"  mode: {images[0].mode}, size: {images[0].size}")
+    print("="*80 + "\n")
+    # ===== 调试结束 =====
 
     
     input_data = []
 
     
-    for prompt, image in zip(prompts, images):
+    for idx, (prompt, image) in enumerate(zip(prompts, images)):
+        # ===== 调试：每个样本 =====
+        print(f"\n--- 处理第 {idx} 个样本 ---")
+        print(f"prompt 类型: {type(prompt)}")
+        if isinstance(prompt, list):
+            print(f"prompt 长度: {len(prompt)}")
+            if len(prompt) > 0:
+                print(f"prompt[0] 类型: {type(prompt[0])}")
+                print(f"prompt[0] 内容: {prompt[0]}")
+        else:
+            print(f"prompt 内容（前100字符）: {str(prompt)[:100]}")
+        print(f"image 类型: {type(image)}")
+        # ===== 调试结束 =====
+        
         current_image = image
         if current_image:
             if current_image.mode in ("RGBA", "LA", "P"):
@@ -691,7 +731,10 @@ def vllm_generate_with_tool_calls(
                     
         current_image_base64 = pil_to_base64(current_image)
         if isinstance(prompt, list):
-            for p in prompt:
+            for p_idx, p in enumerate(prompt):
+                # ===== 调试：检查p =====
+                print(f"  遍历 prompt[{p_idx}], 类型: {type(p)}, 内容: {p}")
+                # ===== 调试结束 =====
                 for c in p["content"]:
                     if c["type"] == "image":
                         c["type"] = "image_url"
