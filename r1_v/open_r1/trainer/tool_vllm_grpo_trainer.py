@@ -276,6 +276,10 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 pad_token_id = processing_class.tokenizer.pad_token_id
                 processing_class.pad_token_id = pad_token_id
                 processing_class.eos_token_id = processing_class.tokenizer.eos_token_id
+                # 设置padding方向为left（Flash Attention要求）
+                processing_class.tokenizer.padding_side = "left"
+                if hasattr(processing_class, 'padding_side'):
+                    processing_class.padding_side = "left"
                 # if "Qwen" in model_id:
                 #     processing_class.image_processor.max_pixels = max_pixels
                 #     processing_class.image_processor.min_pixels = min_pixels
@@ -318,6 +322,9 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     reward_processing_class.pad_token = (
                         reward_processing_class.eos_token
                     )
+                # 设置padding方向为left（Flash Attention要求）
+                reward_processing_class.padding_side = "left"
+                
                 # The reward model computes the reward for the latest non-padded token in the input sequence.
                 # So it's important to set the pad token ID to the padding token ID of the processing class.
                 reward_func.config.pad_token_id = reward_processing_class.pad_token_id
@@ -649,6 +656,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             print(f"ℹ️ GRPO采样: {len(prompts)} 个输入（包含重复），num_generations={num_generations}")
             print(f"   预期每 {num_generations} 个输入属于同一个样本的不同候选")
         
+        # 显式设置tokenizer的padding方向为left（Flash Attention要求）
+        if hasattr(self.processing_class, 'tokenizer'):
+            self.processing_class.tokenizer.padding_side = "left"
+        if hasattr(self.processing_class, 'padding_side'):
+            self.processing_class.padding_side = "left"
+        
         prompt_inputs = self.processing_class(
             # prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
             text=prompts_text,
@@ -947,6 +960,13 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     ]
                 else:
                     texts = [p + c for p, c in zip(prompts, completions)]
+                
+                # 显式设置reward tokenizer的padding方向
+                if hasattr(reward_processing_class, 'tokenizer'):
+                    reward_processing_class.tokenizer.padding_side = "left"
+                if hasattr(reward_processing_class, 'padding_side'):
+                    reward_processing_class.padding_side = "left"
+                
                 reward_inputs = reward_processing_class(
                     texts,
                     return_tensors="pt",
