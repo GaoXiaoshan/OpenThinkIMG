@@ -564,6 +564,27 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         image_grid_thw,
         logits_to_keep,
     ):
+        # 调试：检查attention_mask模式
+        print(f"\n🔍 [_get_per_token_logps] 检查输入数据:")
+        print(f"   input_ids shape: {input_ids.shape}")
+        print(f"   attention_mask shape: {attention_mask.shape}")
+        
+        # 检查padding模式（通过attention_mask判断）
+        # Left padding: [0, 0, 1, 1, 1]（padding在左边）
+        # Right padding: [1, 1, 1, 0, 0]（padding在右边）
+        first_sample_mask = attention_mask[0]
+        first_one_idx = (first_sample_mask == 1).nonzero(as_tuple=True)[0][0].item() if (first_sample_mask == 1).any() else -1
+        last_one_idx = (first_sample_mask == 1).nonzero(as_tuple=True)[0][-1].item() if (first_sample_mask == 1).any() else -1
+        
+        if first_one_idx == 0:
+            print(f"   ⚠️ 检测到 RIGHT padding: attention_mask = [1, 1, ..., 0, 0]")
+            print(f"   第一个样本的mask前5个: {first_sample_mask[:5].tolist()}")
+            print(f"   第一个样本的mask后5个: {first_sample_mask[-5:].tolist()}")
+        else:
+            print(f"   ✅ 检测到 LEFT padding: attention_mask = [0, 0, ..., 1, 1]")
+            print(f"   第一个样本的mask前5个: {first_sample_mask[:5].tolist()}")
+            print(f"   第一个样本的mask后5个: {first_sample_mask[-5:].tolist()}")
+        
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
