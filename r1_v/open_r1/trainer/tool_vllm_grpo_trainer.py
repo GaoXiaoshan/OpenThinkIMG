@@ -725,31 +725,39 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         prompt_ids = prompt_inputs["input_ids"]
         prompt_mask = prompt_inputs["attention_mask"]
         
-        # 检查是否是right padding（第一个token是1）
+        # 检查是否是right padding（第一个token是1且最后一个是0）
         if prompt_mask[0, 0] == 1 and prompt_mask[0, -1] == 0:
             print(f"⚠️ 检测到RIGHT padding，正在转换为LEFT padding...")
             # 对每个序列进行转换
             new_prompt_ids = []
             new_prompt_mask = []
             for ids, mask in zip(prompt_ids, prompt_mask):
-                # 找到有效内容（mask=1的部分）
+                # 找到有效内容的长度
                 valid_length = mask.sum().item()
                 pad_length = len(mask) - valid_length
                 
-                # RIGHT padding: [content..., PAD, PAD] -> LEFT padding: [PAD, PAD, content...]
-                # 提取有效内容（前valid_length个token）
-                content_ids = ids[:valid_length]
-                pad_token = ids[valid_length] if valid_length < len(ids) else self.processing_class.tokenizer.pad_token_id
-                
-                # 创建左padding
-                padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
-                new_ids = torch.cat([padding_ids, content_ids], dim=0)
-                
-                # 创建左padding mask
-                new_mask = torch.cat([
-                    torch.zeros(pad_length, dtype=mask.dtype),  # padding mask (0)
-                    torch.ones(valid_length, dtype=mask.dtype),  # content mask (1)
-                ], dim=0)
+                if pad_length > 0 and mask[0] == 1:  # 确认是RIGHT padding
+                    # RIGHT padding: [content..., PAD, PAD] -> LEFT padding: [PAD, PAD, content...]
+                    # 找到第一个PAD的位置（即有效内容的结束位置）
+                    first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item() if (mask == 0).any() else len(mask)
+                    
+                    # 提取有效内容（从开始到第一个PAD之前）
+                    content_ids = ids[:first_pad_idx]
+                    pad_token = self.processing_class.tokenizer.pad_token_id
+                    
+                    # 创建左padding
+                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                    
+                    # 创建左padding mask
+                    new_mask = torch.cat([
+                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
+                        torch.ones(first_pad_idx, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
+                else:
+                    # 已经是LEFT padding或无padding
+                    new_ids = ids
+                    new_mask = mask
                 
                 new_prompt_ids.append(new_ids)
                 new_prompt_mask.append(new_mask)
@@ -1036,13 +1044,14 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 new_mask = []
                 for ids, mask in zip(prompt_completion_ids, attention_mask):
                     valid_length = mask.sum().item()
-                    total_length = len(mask)
-                    pad_length = total_length - valid_length
+                    pad_length = len(mask) - valid_length
                     
-                    if pad_length > 0:
-                        # 找到所有有效token（mask=1的位置）
-                        valid_indices = (mask == 1).nonzero(as_tuple=True)[0]
-                        content_ids = ids[valid_indices]
+                    if pad_length > 0 and mask[0] == 1:
+                        # RIGHT/MIXED padding：找到第一个0的位置
+                        first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                        
+                        # 提取从开始到第一个0之前的内容（这是连续的有效内容）
+                        content_ids = ids[:first_zero_idx]
                         
                         # 创建left padding
                         pad_token = self.processing_class.pad_token_id
@@ -1051,10 +1060,10 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                         
                         new_m = torch.cat([
                             torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                            torch.ones(valid_length, dtype=mask.dtype, device=mask.device),
+                            torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
                         ], dim=0)
                     else:
-                        # 没有padding，保持不变
+                        # 没有padding或已经是LEFT padding
                         new_id = ids
                         new_m = mask
                     
@@ -1159,15 +1168,21 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                             valid_length = mask.sum().item()
                             pad_length = len(mask) - valid_length
                             
-                            content_ids = ids[:valid_length]
-                            pad_token = ids[valid_length] if valid_length < len(ids) else reward_processing_class.tokenizer.pad_token_id
-                            padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
-                            new_ids = torch.cat([padding_ids, content_ids], dim=0)
-                            
-                            new_mask = torch.cat([
-                                torch.zeros(pad_length, dtype=mask.dtype),
-                                torch.ones(valid_length, dtype=mask.dtype),
-                            ], dim=0)
+                            if pad_length > 0 and mask[0] == 1:
+                                # 找到第一个PAD的位置
+                                first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                                content_ids = ids[:first_pad_idx]
+                                pad_token = reward_processing_class.tokenizer.pad_token_id
+                                padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
+                                new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                                
+                                new_mask = torch.cat([
+                                    torch.zeros(pad_length, dtype=mask.dtype),
+                                    torch.ones(first_pad_idx, dtype=mask.dtype),
+                                ], dim=0)
+                            else:
+                                new_ids = ids
+                                new_mask = mask
                             
                             new_reward_ids.append(new_ids)
                             new_reward_mask.append(new_mask)
@@ -1278,16 +1293,17 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     valid_length = mask.sum().item()
                     pad_length = len(mask) - valid_length
                     
-                    if pad_length > 0:
-                        valid_indices = (mask == 1).nonzero(as_tuple=True)[0]
-                        content_ids = ids[valid_indices]
+                    if pad_length > 0 and mask[0] == 1:
+                        # 找到第一个PAD的位置
+                        first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                        content_ids = ids[:first_pad_idx]
                         
                         pad_token = self.processing_class.pad_token_id
                         padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
                         new_id = torch.cat([padding_ids, content_ids], dim=0)
                         new_m = torch.cat([
                             torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                            torch.ones(valid_length, dtype=mask.dtype, device=mask.device),
+                            torch.ones(first_pad_idx, dtype=mask.dtype, device=mask.device),
                         ], dim=0)
                     else:
                         new_id = ids
