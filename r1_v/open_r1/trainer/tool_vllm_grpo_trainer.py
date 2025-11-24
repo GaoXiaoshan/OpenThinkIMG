@@ -554,6 +554,74 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
     # def _get_train_sampler(self):
     #     return RepeatSequentialSampler(self.train_dataset, self.num_generations)
     
+    def _validate_padding(self, input_ids, attention_mask, stage_name=""):
+        """验证padding的正确性"""
+        pad_token_id = self.processing_class.pad_token_id
+        
+        for i in range(min(1, input_ids.shape[0])):  # 只验证第1个样本，避免太多输出
+            ids = input_ids[i]
+            mask = attention_mask[i]
+            
+            print(f"\n🔍 [{stage_name}] 验证样本{i}:")
+            print(f"   Shape: {ids.shape}")
+            
+            # 1. 检查mask和ids的对应关系
+            mask_zeros = (mask == 0).sum().item()
+            mask_ones = (mask == 1).sum().item()
+            print(f"   Mask统计: {mask_zeros} 个0（padding）, {mask_ones} 个1（内容）")
+            
+            # 2. 检查padding token的位置
+            pad_positions = (ids == pad_token_id).nonzero(as_tuple=True)[0]
+            if len(pad_positions) > 0:
+                print(f"   PAD token位置: 共{len(pad_positions)}个")
+                if len(pad_positions) <= 10:
+                    print(f"      位置: {pad_positions.tolist()}")
+                else:
+                    print(f"      前5个: {pad_positions[:5].tolist()}, 后5个: {pad_positions[-5:].tolist()}")
+                
+                # 检查PAD是否都在左边（LEFT padding）
+                if len(pad_positions) > 0:
+                    first_pad = pad_positions[0].item()
+                    last_pad = pad_positions[-1].item()
+                    if first_pad == 0 and last_pad == len(pad_positions) - 1:
+                        print(f"   ✅ PAD token都在左边（位置0到{last_pad}）- LEFT padding正确")
+                    else:
+                        print(f"   ⚠️ PAD token位置不连续或不在左边！")
+                        print(f"      第一个PAD: {first_pad}, 最后一个PAD: {last_pad}")
+            else:
+                print(f"   ℹ️ 无PAD token（序列可能没有padding或全是有效内容）")
+            
+            # 3. 检查mask=0的位置是否对应PAD token
+            mask_zero_positions = (mask == 0).nonzero(as_tuple=True)[0]
+            if len(mask_zero_positions) > 0 and len(pad_positions) > 0:
+                if torch.equal(mask_zero_positions, pad_positions):
+                    print(f"   ✅ mask=0的位置与PAD token位置完全匹配")
+                else:
+                    print(f"   ⚠️ mask=0的位置与PAD token位置不匹配！")
+                    print(f"      mask=0位置: {mask_zero_positions[:5].tolist()}...")
+                    print(f"      PAD位置: {pad_positions[:5].tolist()}...")
+            
+            # 4. 检查mask=1的区域是否连续
+            mask_one_positions = (mask == 1).nonzero(as_tuple=True)[0]
+            if len(mask_one_positions) > 0:
+                first_content = mask_one_positions[0].item()
+                last_content = mask_one_positions[-1].item()
+                expected_length = last_content - first_content + 1
+                actual_length = len(mask_one_positions)
+                
+                if expected_length == actual_length:
+                    print(f"   ✅ 内容区域连续（位置{first_content}到{last_content}）")
+                else:
+                    print(f"   ⚠️ 内容区域不连续！期望{expected_length}个token，实际{actual_length}个")
+            
+            # 5. 显示实际token（前后各10个）
+            print(f"   前10个token IDs: {ids[:10].tolist()}")
+            print(f"   后10个token IDs: {ids[-10:].tolist()}")
+            print(f"   前10个mask: {mask[:10].tolist()}")
+            print(f"   后10个mask: {mask[-10:].tolist()}")
+            
+        return True
+    
     # Get the per-token log probabilities for the completions for the model and the reference model
     def _get_per_token_logps(
         self,
@@ -564,32 +632,30 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         image_grid_thw,
         logits_to_keep,
     ):
-        # 调试：检查attention_mask模式（检查整个batch）
+        # 🔍 详细验证padding正确性（只在第1个batch验证，避免过多输出）
+        if not hasattr(self, '_padding_validated'):
+            self._validate_padding(input_ids, attention_mask, stage_name="_get_per_token_logps")
+            self._padding_validated = True  # 只验证一次
+        
+        # 简单检查padding模式
         print(f"\n🔍 [_get_per_token_logps] 检查输入数据:")
         print(f"   input_ids shape: {input_ids.shape}")
         print(f"   attention_mask shape: {attention_mask.shape}")
         
-        # 检查每个样本的padding模式（仅用于调试，不阻断训练）
-        for i in range(min(2, attention_mask.shape[0])):  # 检查前2个样本
-            mask = attention_mask[i]
-            has_padding = (mask == 0).any()
-            if has_padding:
-                first_one = (mask == 1).nonzero(as_tuple=True)[0][0].item()
-                last_one = (mask == 1).nonzero(as_tuple=True)[0][-1].item()
-                first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item()
-                
-                # RIGHT/MIXED padding: 第一个是1且存在0在1后面
-                if first_one == 0 and first_zero > first_one:
-                    print(f"   ⚠️ 样本{i}: RIGHT/MIXED padding detected!")
-                    print(f"      前10个: {mask[:10].tolist()}")
-                    print(f"      后10个: {mask[-10:].tolist()}")
-                    print(f"      第一个1的位置: {first_one}, 最后一个1的位置: {last_one}, 第一个0的位置: {first_zero}")
-                else:
-                    print(f"   ✅ 样本{i}: LEFT padding (0在前，1在后)")
-                    print(f"      前10个: {mask[:10].tolist()}")
-                    print(f"      后10个: {mask[-10:].tolist()}")
+        # 检查第1个样本
+        mask = attention_mask[0]
+        has_padding = (mask == 0).any()
+        if has_padding:
+            first_one = (mask == 1).nonzero(as_tuple=True)[0][0].item()
+            first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+            
+            if first_one == 0 and first_zero > first_one:
+                print(f"   ⚠️ 样本0: RIGHT/MIXED padding detected!")
+                print(f"      mask前10个: {mask[:10].tolist()}, 后10个: {mask[-10:].tolist()}")
             else:
-                print(f"   ℹ️ 样本{i}: 无padding（全是有效token）")
+                print(f"   ✅ 样本0: LEFT padding")
+        else:
+            print(f"   ℹ️ 样本0: 无padding")
         
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
@@ -765,6 +831,11 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             prompt_ids = torch.stack(new_prompt_ids)
             prompt_mask = torch.stack(new_prompt_mask)
             print(f"✅ 转换完成：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+            
+            # 验证转换后的数据（只在第1次）
+            if not hasattr(self, '_prompt_padding_validated'):
+                self._validate_padding(prompt_ids, prompt_mask, stage_name="Prompt转换后")
+                self._prompt_padding_validated = True
         else:
             print(f"✅ 已经是LEFT padding：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
         
@@ -1073,6 +1144,11 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 prompt_completion_ids = torch.stack(new_ids)
                 attention_mask = torch.stack(new_mask)
                 print(f"✅ 转换完成: mask前5个={attention_mask[0][:5].tolist()}，后5个={attention_mask[0][-5:].tolist()}")
+                
+                # 验证拼接后的数据（只在第1次）
+                if not hasattr(self, '_concat_padding_validated'):
+                    self._validate_padding(prompt_completion_ids, attention_mask, stage_name="拼接后转换完成")
+                    self._concat_padding_validated = True
         else:
             print(f"✅ 已经是LEFT padding")
         
