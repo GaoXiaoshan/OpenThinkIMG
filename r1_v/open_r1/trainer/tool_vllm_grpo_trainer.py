@@ -667,8 +667,14 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
         if self.args.use_vllm:
+            import sys
+            print(f"🚀 [Rank {self.accelerator.process_index}] 进入VLLM生成分支")
+            sys.stdout.flush()
+            
             # First, have main process load weights if needed
             if self.state.global_step != self._last_loaded_step:
+                print(f"⚙️ [Rank {self.accelerator.process_index}] 需要加载权重")
+                sys.stdout.flush()
                 with unwrap_model_for_generation(
                     self.model,
                     self.accelerator,
@@ -686,9 +692,21 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
+            import sys
+            print(f"🔗 [Rank {self.accelerator.process_index}] 开始gather操作")
+            sys.stdout.flush()
+            
             all_prompts_text = self.gather_objects_via_tensors(prompts_text)
+            print(f"✅ [Rank {self.accelerator.process_index}] prompts_text gather完成")
+            sys.stdout.flush()
+            
             all_prompts = self.gather_objects_via_tensors(prompts)
+            print(f"✅ [Rank {self.accelerator.process_index}] prompts gather完成")
+            sys.stdout.flush()
+            
             all_images = self.gather_objects_via_tensors(images)
+            print(f"✅ [Rank {self.accelerator.process_index}] images gather完成")
+            sys.stdout.flush()
             
             # gather_objects_via_tensors 返回 [GPU0的数据, GPU1的数据, ...]
             # 需要展平为一维列表
@@ -714,6 +732,16 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             if self.max_prompt_length is None:
                 self.max_prompt_length = 2048
 
+            print(f"⚡ [Rank {self.accelerator.process_index}] 准备进入生成分支")
+            sys.stdout.flush()
+            
+            # 添加同步点：确保所有进程都到达这里
+            print(f"🔄 [Rank {self.accelerator.process_index}] 等待所有进程同步...")
+            sys.stdout.flush()
+            self.accelerator.wait_for_everyone()
+            print(f"✅ [Rank {self.accelerator.process_index}] 同步完成")
+            sys.stdout.flush()
+            
             if self.accelerator.is_main_process:
                 ## SU: for debug
                 for i, (prompt, image) in enumerate(zip(all_prompts, all_images)):
