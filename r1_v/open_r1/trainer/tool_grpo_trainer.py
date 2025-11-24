@@ -470,7 +470,7 @@ class Qwen2VLGRPOTrainer(Trainer):
                 else:
                     texts = [p + c for p, c in zip(prompts, completions)]
                 reward_inputs = reward_processing_class(
-                    texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
+                    texts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False  # 修改为left，适配Flash Attention
                 )
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():

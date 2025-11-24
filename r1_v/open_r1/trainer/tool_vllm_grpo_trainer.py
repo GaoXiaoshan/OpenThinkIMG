@@ -951,7 +951,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     texts,
                     return_tensors="pt",
                     padding=True,
-                    padding_side="right",
+                    padding_side="left",  # 修改为left，适配Flash Attention
                     add_special_tokens=False,
                 )
                 reward_inputs = super()._prepare_inputs(reward_inputs)
