@@ -791,53 +791,56 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         prompt_ids = prompt_inputs["input_ids"]
         prompt_mask = prompt_inputs["attention_mask"]
         
-        # 检查是否是right padding（第一个token是1且最后一个是0）
-        if prompt_mask[0, 0] == 1 and prompt_mask[0, -1] == 0:
-            print(f"⚠️ 检测到RIGHT padding，正在转换为LEFT padding...")
-            # 对每个序列进行转换
-            new_prompt_ids = []
-            new_prompt_mask = []
-            for ids, mask in zip(prompt_ids, prompt_mask):
-                # 找到有效内容的长度
-                valid_length = mask.sum().item()
-                pad_length = len(mask) - valid_length
+        # 🔧 逐个样本检查并转换prompt padding
+        new_prompt_ids = []
+        new_prompt_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(prompt_ids, prompt_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                # 检测到RIGHT padding
+                first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
                 
-                if pad_length > 0 and mask[0] == 1:  # 确认是RIGHT padding
-                    # RIGHT padding: [content..., PAD, PAD] -> LEFT padding: [PAD, PAD, content...]
-                    # 找到第一个PAD的位置（即有效内容的结束位置）
-                    first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item() if (mask == 0).any() else len(mask)
+                if first_pad_idx > 0:  # 确认不是LEFT padding
+                    needs_conversion = True
+                    if idx == 0:
+                        print(f"⚠️ Prompt样本{idx}检测到RIGHT padding（第一个PAD在位置{first_pad_idx}），正在转换...")
                     
-                    # 提取有效内容（从开始到第一个PAD之前）
+                    valid_length = mask.sum().item()
+                    pad_length = len(mask) - valid_length
+                    
                     content_ids = ids[:first_pad_idx]
                     pad_token = self.processing_class.tokenizer.pad_token_id
-                    
-                    # 创建左padding
                     padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
                     new_ids = torch.cat([padding_ids, content_ids], dim=0)
                     
-                    # 创建左padding mask
                     new_mask = torch.cat([
                         torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
                         torch.ones(first_pad_idx, dtype=mask.dtype, device=mask.device),
                     ], dim=0)
+                    
+                    new_prompt_ids.append(new_ids)
+                    new_prompt_mask.append(new_mask)
                 else:
-                    # 已经是LEFT padding或无padding
-                    new_ids = ids
-                    new_mask = mask
-                
-                new_prompt_ids.append(new_ids)
-                new_prompt_mask.append(new_mask)
-            
+                    new_prompt_ids.append(ids)
+                    new_prompt_mask.append(mask)
+            else:
+                new_prompt_ids.append(ids)
+                new_prompt_mask.append(mask)
+        
+        if needs_conversion:
             prompt_ids = torch.stack(new_prompt_ids)
             prompt_mask = torch.stack(new_prompt_mask)
-            print(f"✅ 转换完成：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+            print(f"✅ Prompt转换完成：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
             
             # 验证转换后的数据（只在第1次）
             if not hasattr(self, '_prompt_padding_validated'):
                 self._validate_padding(prompt_ids, prompt_mask, stage_name="Prompt转换后")
                 self._prompt_padding_validated = True
         else:
-            print(f"✅ 已经是LEFT padding：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+            print(f"✅ Prompt已经是LEFT padding")
         
         prompt_ids = prompt_ids.to(device)
         prompt_mask = prompt_mask.to(device)
@@ -1105,52 +1108,61 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         print(f"   attention_mask[0]前5个: {attention_mask[0][:5].tolist()}")
         print(f"   attention_mask[0]后5个: {attention_mask[0][-5:].tolist()}")
         
-        # 检查并转换为LEFT padding
-        if attention_mask[0, 0] == 1 and (attention_mask[0] == 0).any():
-            # 检测到有padding且第一个是1（可能是mixed/right padding）
-            first_zero = (attention_mask[0] == 0).nonzero(as_tuple=True)[0]
-            if len(first_zero) > 0 and first_zero[0] > 0:
-                print(f"⚠️ 检测到非LEFT padding（混合或RIGHT），正在重新调整...")
-                new_ids = []
-                new_mask = []
-                for ids, mask in zip(prompt_completion_ids, attention_mask):
+        # 🔧 逐个样本检查并转换（不能只检查第1个样本！）
+        new_ids = []
+        new_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(prompt_completion_ids, attention_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                # 检测到RIGHT/MIXED padding
+                first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                
+                if first_zero_idx > 0:  # 确认不是LEFT padding
+                    needs_conversion = True
+                    if idx == 0:  # 只打印第1个需要转换的样本
+                        print(f"⚠️ 样本{idx}检测到非LEFT padding（第一个0在位置{first_zero_idx}），正在转换...")
+                    
                     valid_length = mask.sum().item()
                     pad_length = len(mask) - valid_length
                     
-                    if pad_length > 0 and mask[0] == 1:
-                        # RIGHT/MIXED padding：找到第一个0的位置
-                        first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
-                        
-                        # 提取从开始到第一个0之前的内容（这是连续的有效内容）
-                        content_ids = ids[:first_zero_idx]
-                        
-                        # 创建left padding
-                        pad_token = self.processing_class.pad_token_id
-                        padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
-                        new_id = torch.cat([padding_ids, content_ids], dim=0)
-                        
-                        new_m = torch.cat([
-                            torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                            torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
-                        ], dim=0)
-                    else:
-                        # 没有padding或已经是LEFT padding
-                        new_id = ids
-                        new_m = mask
+                    # 提取从开始到第一个0之前的内容
+                    content_ids = ids[:first_zero_idx]
+                    
+                    # 创建left padding
+                    pad_token = self.processing_class.pad_token_id
+                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_id = torch.cat([padding_ids, content_ids], dim=0)
+                    
+                    new_m = torch.cat([
+                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
+                        torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
                     
                     new_ids.append(new_id)
                     new_mask.append(new_m)
-                
-                prompt_completion_ids = torch.stack(new_ids)
-                attention_mask = torch.stack(new_mask)
-                print(f"✅ 转换完成: mask前5个={attention_mask[0][:5].tolist()}，后5个={attention_mask[0][-5:].tolist()}")
-                
-                # 验证拼接后的数据（只在第1次）
-                if not hasattr(self, '_concat_padding_validated'):
-                    self._validate_padding(prompt_completion_ids, attention_mask, stage_name="拼接后转换完成")
-                    self._concat_padding_validated = True
+                else:
+                    # 已经是LEFT padding
+                    new_ids.append(ids)
+                    new_mask.append(mask)
+            else:
+                # 无padding或已经是LEFT padding
+                new_ids.append(ids)
+                new_mask.append(mask)
+        
+        if needs_conversion:
+            prompt_completion_ids = torch.stack(new_ids)
+            attention_mask = torch.stack(new_mask)
+            print(f"✅ 转换完成: mask前5个={attention_mask[0][:5].tolist()}，后5个={attention_mask[0][-5:].tolist()}")
+            
+            # 验证拼接后的数据（只在第1次）
+            if not hasattr(self, '_concat_padding_validated'):
+                self._validate_padding(prompt_completion_ids, attention_mask, stage_name="拼接后转换完成")
+                self._concat_padding_validated = True
         else:
-            print(f"✅ 已经是LEFT padding")
+            print(f"✅ 整个batch已经是LEFT padding")
         
         # pixel_values = prompt_inputs["pixel_values"].repeat_interleave(
         #     self.num_generations, dim=0
@@ -1231,22 +1243,28 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     add_special_tokens=False,
                 )
                 
-                # 🔧 手动修复reward model的attention_mask
+                # 🔧 手动修复reward model的attention_mask（逐个样本检查）
                 if "attention_mask" in reward_inputs:
                     reward_mask = reward_inputs["attention_mask"]
                     reward_ids = reward_inputs["input_ids"]
                     
-                    if reward_mask[0, 0] == 1 and reward_mask[0, -1] == 0:
-                        print(f"⚠️ [Reward Model] 检测到RIGHT padding，正在转换为LEFT padding...")
-                        new_reward_ids = []
-                        new_reward_mask = []
-                        for ids, mask in zip(reward_ids, reward_mask):
-                            valid_length = mask.sum().item()
-                            pad_length = len(mask) - valid_length
+                    new_reward_ids = []
+                    new_reward_mask = []
+                    needs_conversion = False
+                    
+                    for idx, (ids, mask) in enumerate(zip(reward_ids, reward_mask)):
+                        has_padding = (mask == 0).any().item()
+                        
+                        if has_padding and mask[0] == 1:
+                            first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
                             
-                            if pad_length > 0 and mask[0] == 1:
-                                # 找到第一个PAD的位置
-                                first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                            if first_pad_idx > 0:
+                                needs_conversion = True
+                                if idx == 0:
+                                    print(f"⚠️ [Reward Model] 样本{idx}检测到RIGHT padding，正在转换...")
+                                
+                                valid_length = mask.sum().item()
+                                pad_length = len(mask) - valid_length
                                 content_ids = ids[:first_pad_idx]
                                 pad_token = reward_processing_class.tokenizer.pad_token_id
                                 padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype)
@@ -1256,16 +1274,22 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                     torch.zeros(pad_length, dtype=mask.dtype),
                                     torch.ones(first_pad_idx, dtype=mask.dtype),
                                 ], dim=0)
+                                
+                                new_reward_ids.append(new_ids)
+                                new_reward_mask.append(new_mask)
                             else:
-                                new_ids = ids
-                                new_mask = mask
-                            
-                            new_reward_ids.append(new_ids)
-                            new_reward_mask.append(new_mask)
-                        
+                                new_reward_ids.append(ids)
+                                new_reward_mask.append(mask)
+                        else:
+                            new_reward_ids.append(ids)
+                            new_reward_mask.append(mask)
+                    
+                    if needs_conversion:
                         reward_inputs["input_ids"] = torch.stack(new_reward_ids)
                         reward_inputs["attention_mask"] = torch.stack(new_reward_mask)
                         print(f"✅ [Reward Model] 转换完成")
+                    else:
+                        print(f"✅ [Reward Model] 已经是LEFT padding")
                 
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():
@@ -1357,40 +1381,51 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         
-        # 🔧 [compute_loss] 关键修复：拼接后转换为LEFT padding
+        # 🔧 [compute_loss] 关键修复：拼接后转换为LEFT padding（逐个样本检查）
         print(f"🔍 [compute_loss] 拼接后检查: input_ids shape = {input_ids.shape}")
-        if attention_mask[0, 0] == 1 and (attention_mask[0] == 0).any():
-            first_zero = (attention_mask[0] == 0).nonzero(as_tuple=True)[0]
-            if len(first_zero) > 0 and first_zero[0] > 0:
-                print(f"⚠️ [compute_loss] 检测到非LEFT padding，正在转换...")
-                new_ids = []
-                new_mask = []
-                for ids, mask in zip(input_ids, attention_mask):
+        
+        new_ids = []
+        new_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(input_ids, attention_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                
+                if first_zero_idx > 0:
+                    needs_conversion = True
+                    if idx == 0:
+                        print(f"⚠️ [compute_loss] 样本{idx}检测到非LEFT padding，正在转换...")
+                    
                     valid_length = mask.sum().item()
                     pad_length = len(mask) - valid_length
                     
-                    if pad_length > 0 and mask[0] == 1:
-                        # 找到第一个PAD的位置
-                        first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
-                        content_ids = ids[:first_pad_idx]
-                        
-                        pad_token = self.processing_class.pad_token_id
-                        padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
-                        new_id = torch.cat([padding_ids, content_ids], dim=0)
-                        new_m = torch.cat([
-                            torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
-                            torch.ones(first_pad_idx, dtype=mask.dtype, device=mask.device),
-                        ], dim=0)
-                    else:
-                        new_id = ids
-                        new_m = mask
+                    content_ids = ids[:first_zero_idx]
+                    pad_token = self.processing_class.pad_token_id
+                    padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_id = torch.cat([padding_ids, content_ids], dim=0)
+                    new_m = torch.cat([
+                        torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
+                        torch.ones(first_zero_idx, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
                     
                     new_ids.append(new_id)
                     new_mask.append(new_m)
-                
-                input_ids = torch.stack(new_ids)
-                attention_mask = torch.stack(new_mask)
-                print(f"✅ [compute_loss] 转换完成")
+                else:
+                    new_ids.append(ids)
+                    new_mask.append(mask)
+            else:
+                new_ids.append(ids)
+                new_mask.append(mask)
+        
+        if needs_conversion:
+            input_ids = torch.stack(new_ids)
+            attention_mask = torch.stack(new_mask)
+            print(f"✅ [compute_loss] 转换完成")
+        else:
+            print(f"✅ [compute_loss] 整个batch已经是LEFT padding")
         
         pixel_values = inputs["pixel_values"].to(dtype=torch.bfloat16)
         image_grid_thw = inputs["image_grid_thw"]
