@@ -664,15 +664,20 @@ def vllm_generate_with_tool_calls(
     tool_manager = ToolManager(controller_addr)
     tool_manager.available_tools = [tool for tool in tool_manager.available_tools if tool not in ['crop', 'drawline']]
     print(f"controller_addr: {controller_addr}")
-    print(f"Avaliable tools are {tool_manager.available_tools}")
+    print(f"Available tools: {tool_manager.available_tools}")
+    
+    # 只检查实际需要的工具（移除了Point和SegmentRegionAroundPoint）
+    required_tools = ["ZoomInSubfigure", "DrawHorizontalLineByY", "OCR", "DrawVerticalLineByX"]
     miss_tool = []
-    for tool in ["ZoomInSubfigure","DrawHorizontalLineByY","OCR","DrawVerticalLineByX","SegmentRegionAroundPoint","Point"]:
+    for tool in required_tools:
         if tool not in tool_manager.available_tools:
             miss_tool.append(tool)
+    
     if len(miss_tool) == 0:
-        print("All tools are called successfully")
+        print(f"✅ 所有必需工具已加载: {required_tools}")
     else:
-        print(f"Not all tools is called successfully, missing tool {miss_tool}")
+        print(f"⚠️ 缺少工具: {miss_tool}")
+        print(f"   可用工具: {tool_manager.available_tools}")
 
     # image_tool_manager = ImageToolManager()
     # {"prompt": p, "multi_modal_data": {"image": i}}
@@ -826,15 +831,22 @@ def vllm_generate_with_tool_calls(
                 input_data[input_idx]["tool_cfgs"].append(tool_cfg)
                 original_api_name = tool_cfg[0].get("API_name").lower() 
                 api_params = tool_cfg[0].get("API_params", {})
+                
+                # 工具名称映射（移除了Point和SegmentRegionAroundPoint）
                 tool_name_mapping = {
                     'drawhorizontallinebyy': 'DrawHorizontalLineByY',
                     'zoominsubfigure': 'ZoomInSubfigure',
                     'drawverticallinebyx': 'DrawVerticalLineByX',
-                    'segmentregionaroundpoint': 'SegmentRegionAroundPoint',
-                    'point': 'Point',
-                    'ocr': 'OCR'
+                    'ocr': 'OCR',
+                    'terminate': 'Terminate'
                 }
                 api_name = tool_name_mapping.get(original_api_name)
+                
+                # 如果模型尝试调用不存在的工具，跳过
+                if api_name is None:
+                    print(f"⚠️ 未知工具: {original_api_name}，跳过")
+                    input_data[input_idx]["status"] = "finished"
+                    continue
 
                 # breakpoint()
                 # if "Terminate" in output_text:
