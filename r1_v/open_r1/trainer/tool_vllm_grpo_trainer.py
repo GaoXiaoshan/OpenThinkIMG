@@ -564,26 +564,31 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         image_grid_thw,
         logits_to_keep,
     ):
-        # 调试：检查attention_mask模式
+        # 调试：检查attention_mask模式（检查整个batch）
         print(f"\n🔍 [_get_per_token_logps] 检查输入数据:")
         print(f"   input_ids shape: {input_ids.shape}")
         print(f"   attention_mask shape: {attention_mask.shape}")
         
-        # 检查padding模式（通过attention_mask判断）
-        # Left padding: [0, 0, 1, 1, 1]（padding在左边）
-        # Right padding: [1, 1, 1, 0, 0]（padding在右边）
-        first_sample_mask = attention_mask[0]
-        first_one_idx = (first_sample_mask == 1).nonzero(as_tuple=True)[0][0].item() if (first_sample_mask == 1).any() else -1
-        last_one_idx = (first_sample_mask == 1).nonzero(as_tuple=True)[0][-1].item() if (first_sample_mask == 1).any() else -1
-        
-        if first_one_idx == 0:
-            print(f"   ⚠️ 检测到 RIGHT padding: attention_mask = [1, 1, ..., 0, 0]")
-            print(f"   第一个样本的mask前5个: {first_sample_mask[:5].tolist()}")
-            print(f"   第一个样本的mask后5个: {first_sample_mask[-5:].tolist()}")
-        else:
-            print(f"   ✅ 检测到 LEFT padding: attention_mask = [0, 0, ..., 1, 1]")
-            print(f"   第一个样本的mask前5个: {first_sample_mask[:5].tolist()}")
-            print(f"   第一个样本的mask后5个: {first_sample_mask[-5:].tolist()}")
+        # 检查每个样本的padding模式
+        for i in range(min(2, attention_mask.shape[0])):  # 检查前2个样本
+            mask = attention_mask[i]
+            has_padding = (mask == 0).any()
+            if has_padding:
+                first_one = (mask == 1).nonzero(as_tuple=True)[0][0].item()
+                last_one = (mask == 1).nonzero(as_tuple=True)[0][-1].item()
+                first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item() if (mask == 0).any() else -1
+                
+                if first_one == 0:
+                    print(f"   ⚠️ 样本{i}: RIGHT/MIXED padding detected")
+                    print(f"      前10个: {mask[:10].tolist()}")
+                    print(f"      后10个: {mask[-10:].tolist()}")
+                    print(f"      第一个1的位置: {first_one}, 最后一个1的位置: {last_one}, 第一个0的位置: {first_zero}")
+                else:
+                    print(f"   ✅ 样本{i}: LEFT padding")
+                    print(f"      前10个: {mask[:10].tolist()}")
+                    print(f"      后10个: {mask[-10:].tolist()}")
+            else:
+                print(f"   ℹ️ 样本{i}: 无padding（全是有效token）")
         
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
@@ -977,6 +982,54 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B*G, P+C)
+        
+        # 🔧 关键修复：拼接后需要重新调整为LEFT padding
+        # 因为completion可能是RIGHT padding，拼接后会产生混合padding
+        print(f"🔍 拼接后检查: prompt_completion_ids shape = {prompt_completion_ids.shape}")
+        print(f"   attention_mask[0]前5个: {attention_mask[0][:5].tolist()}")
+        print(f"   attention_mask[0]后5个: {attention_mask[0][-5:].tolist()}")
+        
+        # 检查并转换为LEFT padding
+        if attention_mask[0, 0] == 1 and (attention_mask[0] == 0).any():
+            # 检测到有padding且第一个是1（可能是mixed/right padding）
+            first_zero = (attention_mask[0] == 0).nonzero(as_tuple=True)[0]
+            if len(first_zero) > 0 and first_zero[0] > 0:
+                print(f"⚠️ 检测到非LEFT padding（混合或RIGHT），正在重新调整...")
+                new_ids = []
+                new_mask = []
+                for ids, mask in zip(prompt_completion_ids, attention_mask):
+                    valid_length = mask.sum().item()
+                    total_length = len(mask)
+                    pad_length = total_length - valid_length
+                    
+                    if pad_length > 0:
+                        # 找到所有有效token（mask=1的位置）
+                        valid_indices = (mask == 1).nonzero(as_tuple=True)[0]
+                        content_ids = ids[valid_indices]
+                        
+                        # 创建left padding
+                        pad_token = self.processing_class.pad_token_id
+                        padding_ids = torch.full((pad_length,), pad_token, dtype=ids.dtype, device=ids.device)
+                        new_id = torch.cat([padding_ids, content_ids], dim=0)
+                        
+                        new_m = torch.cat([
+                            torch.zeros(pad_length, dtype=mask.dtype, device=mask.device),
+                            torch.ones(valid_length, dtype=mask.dtype, device=mask.device),
+                        ], dim=0)
+                    else:
+                        # 没有padding，保持不变
+                        new_id = ids
+                        new_m = mask
+                    
+                    new_ids.append(new_id)
+                    new_mask.append(new_m)
+                
+                prompt_completion_ids = torch.stack(new_ids)
+                attention_mask = torch.stack(new_mask)
+                print(f"✅ 转换完成: mask前5个={attention_mask[0][:5].tolist()}，后5个={attention_mask[0][-5:].tolist()}")
+        else:
+            print(f"✅ 已经是LEFT padding")
+        
         # pixel_values = prompt_inputs["pixel_values"].repeat_interleave(
         #     self.num_generations, dim=0
         # )
