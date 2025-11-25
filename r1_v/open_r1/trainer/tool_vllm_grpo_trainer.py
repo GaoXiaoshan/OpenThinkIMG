@@ -276,6 +276,10 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 pad_token_id = processing_class.tokenizer.pad_token_id
                 processing_class.pad_token_id = pad_token_id
                 processing_class.eos_token_id = processing_class.tokenizer.eos_token_id
+                # 设置padding方向为left（Flash Attention要求）
+                processing_class.tokenizer.padding_side = "left"
+                if hasattr(processing_class, 'padding_side'):
+                    processing_class.padding_side = "left"
                 # if "Qwen" in model_id:
                 #     processing_class.image_processor.max_pixels = max_pixels
                 #     processing_class.image_processor.min_pixels = min_pixels
@@ -318,6 +322,9 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     reward_processing_class.pad_token = (
                         reward_processing_class.eos_token
                     )
+                # 设置padding方向为left（Flash Attention要求）
+                reward_processing_class.padding_side = "left"
+                
                 # The reward model computes the reward for the latest non-padded token in the input sequence.
                 # So it's important to set the pad token ID to the padding token ID of the processing class.
                 reward_func.config.pad_token_id = reward_processing_class.pad_token_id
@@ -524,6 +531,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # Instead, we set them to the columns expec                                             ted by the `training_step` method, hence the override.
         if self._signature_columns is None:
             self._signature_columns = ["prompt"]
+        
+        # 验证初始化时的padding_side设置
+        print("\n" + "="*80)
+        print("【Trainer初始化完成 - 验证padding_side设置】")
+        print("="*80)
+        if hasattr(self.processing_class, 'tokenizer'):
+            current_padding = self.processing_class.tokenizer.padding_side
+            print(f"processing_class.tokenizer.padding_side = '{current_padding}'")
+            if current_padding != 'left':
+                print(f"⚠️ 警告：padding_side是'{current_padding}'，不是'left'！")
+        else:
+            print("⚠️ processing_class没有tokenizer属性")
+        print("="*80 + "\n")
     
     # We need a custom sampler that samples the same prompt multiple times
     def _get_train_sampler(self):
@@ -533,6 +553,74 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
     # We need a custom sampler that samples the same prompt multiple times
     # def _get_train_sampler(self):
     #     return RepeatSequentialSampler(self.train_dataset, self.num_generations)
+    
+    def _validate_padding(self, input_ids, attention_mask, stage_name=""):
+        """验证padding的正确性"""
+        pad_token_id = self.processing_class.pad_token_id
+        
+        for i in range(min(1, input_ids.shape[0])):  # 只验证第1个样本，避免太多输出
+            ids = input_ids[i]
+            mask = attention_mask[i]
+            
+            print(f"\n🔍 [{stage_name}] 验证样本{i}:")
+            print(f"   Shape: {ids.shape}")
+            
+            # 1. 检查mask和ids的对应关系
+            mask_zeros = (mask == 0).sum().item()
+            mask_ones = (mask == 1).sum().item()
+            print(f"   Mask统计: {mask_zeros} 个0（padding）, {mask_ones} 个1（内容）")
+            
+            # 2. 检查padding token的位置
+            pad_positions = (ids == pad_token_id).nonzero(as_tuple=True)[0]
+            if len(pad_positions) > 0:
+                print(f"   PAD token位置: 共{len(pad_positions)}个")
+                if len(pad_positions) <= 10:
+                    print(f"      位置: {pad_positions.tolist()}")
+                else:
+                    print(f"      前5个: {pad_positions[:5].tolist()}, 后5个: {pad_positions[-5:].tolist()}")
+                
+                # 检查PAD是否都在左边（LEFT padding）
+                if len(pad_positions) > 0:
+                    first_pad = pad_positions[0].item()
+                    last_pad = pad_positions[-1].item()
+                    if first_pad == 0 and last_pad == len(pad_positions) - 1:
+                        print(f"   ✅ PAD token都在左边（位置0到{last_pad}）- LEFT padding正确")
+                    else:
+                        print(f"   ⚠️ PAD token位置不连续或不在左边！")
+                        print(f"      第一个PAD: {first_pad}, 最后一个PAD: {last_pad}")
+            else:
+                print(f"   ℹ️ 无PAD token（序列可能没有padding或全是有效内容）")
+            
+            # 3. 检查mask=0的位置是否对应PAD token
+            mask_zero_positions = (mask == 0).nonzero(as_tuple=True)[0]
+            if len(mask_zero_positions) > 0 and len(pad_positions) > 0:
+                if torch.equal(mask_zero_positions, pad_positions):
+                    print(f"   ✅ mask=0的位置与PAD token位置完全匹配")
+                else:
+                    print(f"   ⚠️ mask=0的位置与PAD token位置不匹配！")
+                    print(f"      mask=0位置: {mask_zero_positions[:5].tolist()}...")
+                    print(f"      PAD位置: {pad_positions[:5].tolist()}...")
+            
+            # 4. 检查mask=1的区域是否连续
+            mask_one_positions = (mask == 1).nonzero(as_tuple=True)[0]
+            if len(mask_one_positions) > 0:
+                first_content = mask_one_positions[0].item()
+                last_content = mask_one_positions[-1].item()
+                expected_length = last_content - first_content + 1
+                actual_length = len(mask_one_positions)
+                
+                if expected_length == actual_length:
+                    print(f"   ✅ 内容区域连续（位置{first_content}到{last_content}）")
+                else:
+                    print(f"   ⚠️ 内容区域不连续！期望{expected_length}个token，实际{actual_length}个")
+            
+            # 5. 显示实际token（前后各10个）
+            print(f"   前10个token IDs: {ids[:10].tolist()}")
+            print(f"   后10个token IDs: {ids[-10:].tolist()}")
+            print(f"   前10个mask: {mask[:10].tolist()}")
+            print(f"   后10个mask: {mask[-10:].tolist()}")
+            
+        return True
     
     # Get the per-token log probabilities for the completions for the model and the reference model
     def _get_per_token_logps(
@@ -544,6 +632,27 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         image_grid_thw,
         logits_to_keep,
     ):
+        # 🔍 详细验证padding正确性（只在第1个batch验证，避免过多输出）
+        # if not hasattr(self, '_padding_validated'):
+        #     self._validate_padding(input_ids, attention_mask, stage_name="_get_per_token_logps")
+        #     self._padding_validated = True  # 只验证一次
+        
+        # 简单检查padding模式（减少内存占用）
+        if not hasattr(self, '_logps_check_count'):
+            self._logps_check_count = 0
+        
+        if self._logps_check_count < 2:  # 只打印前2次
+            print(f"\n🔍 [_get_per_token_logps] shape: {input_ids.shape}")
+            mask = attention_mask[0]
+            if (mask == 0).any():
+                first_one = (mask == 1).nonzero(as_tuple=True)[0][0].item()
+                first_zero = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                if first_one == 0 and first_zero > first_one:
+                    print(f"   ⚠️ RIGHT/MIXED padding!")
+                else:
+                    print(f"   ✅ LEFT padding")
+            self._logps_check_count += 1
+        
         pixel_values = pixel_values.to(device=model.device)
         image_grid_thw = image_grid_thw.to(device=model.device)
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -570,18 +679,99 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             per_token_logps.append(token_log_prob)
         return torch.stack(per_token_logps)
 
+    def gather_objects_via_tensors(self, obj):
+        """
+        使用张量通信来gather对象，避免使用默认的gather_object导致的卡顿问题
+        
+        Args:
+            obj: 要gather的对象（可以是任何可pickle的Python对象）
+            
+        Returns:
+            list: 所有进程的对象列表 [GPU0的对象, GPU1的对象, ...]
+        """
+        import pickle
+        import torch.distributed as dist
+        
+        if not dist.is_initialized():
+            return [obj]
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        backend = dist.get_backend()
+
+        # Use GPU tensors if backend is NCCL
+        use_gpu = backend.lower() == "nccl"
+
+        device = torch.device("cuda", rank % torch.cuda.device_count()) if use_gpu else torch.device("cpu")
+
+        # 1. Serialize
+        data_bytes = pickle.dumps(obj)
+        byte_tensor = torch.tensor(list(data_bytes), dtype=torch.uint8, device=device)
+
+        # 2. Gather sizes (must be same device as backend)
+        local_size = torch.tensor([byte_tensor.numel()], dtype=torch.long, device=device)
+
+        size_list = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+        dist.all_gather(size_list, local_size)
+
+        sizes = [int(s.item()) for s in size_list]
+        max_size = max(sizes)
+
+        # 3. Pad tensor to max size
+        if byte_tensor.numel() < max_size:
+            padding = torch.zeros(max_size - byte_tensor.numel(), dtype=torch.uint8, device=device)
+            byte_tensor = torch.cat([byte_tensor, padding], dim=0)
+
+        # 4. Allocate gather list
+        gather_list = [torch.zeros(max_size, dtype=torch.uint8, device=device)
+                    for _ in range(world_size)]
+
+        dist.all_gather(gather_list, byte_tensor)
+
+        # 5. Deserialize
+        results = []
+        for i in range(world_size):
+            real_size = sizes[i]
+            data_i = bytes(gather_list[i][:real_size].cpu().numpy().tolist())
+            results.append(pickle.loads(data_i))
+
+        return results
+
     # Trainer "prepares" the inputs before calling `compute_loss`. It converts to tensor and move to device.
     # Since we preprocess the data in `compute_loss`, we need to override this method to skip this step.
     def _prepare_inputs(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
+        
+        # 提取所有数据（保持重复，用于GRPO的多候选采样）
         prompts = [x["prompt"] for x in inputs]
         images = [x["image"] for x in inputs]
+        # ⚠️ 关键：必须在任何tokenization之前就设置padding_side
+        # 显式设置tokenizer的padding方向为left（Flash Attention要求）
+        if hasattr(self.processing_class, 'tokenizer'):
+            self.processing_class.tokenizer.padding_side = "left"
+            print(f"✅ 设置 tokenizer.padding_side = {self.processing_class.tokenizer.padding_side}")
+        if hasattr(self.processing_class, 'padding_side'):
+            self.processing_class.padding_side = "left"
+            print(f"✅ 设置 processing_class.padding_side = {self.processing_class.padding_side}")
+        
+        # 验证设置
+        actual_padding_side = getattr(self.processing_class.tokenizer, 'padding_side', 'unknown') if hasattr(self.processing_class, 'tokenizer') else 'no tokenizer'
+        print(f"📋 Tokenization前验证: padding_side = '{actual_padding_side}'")
+        if actual_padding_side == 'right':
+            raise ValueError(f"❌ padding_side仍然是'right'，设置失败！请检查初始化代码")
+        
         prompts_text = [
             maybe_apply_chat_template(example, self.processing_class)["prompt"]
             for example in inputs
         ]
+        
+        # 调试信息
+        num_generations = self.generation_config.num_return_sequences if hasattr(self, 'generation_config') else 1
+        if num_generations > 1:
+            print(f"ℹ️ GRPO采样: {len(prompts)} 个输入（包含重复），num_generations={num_generations}")
+            print(f"   预期每 {num_generations} 个输入属于同一个样本的不同候选")
         
         prompt_inputs = self.processing_class(
             # prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
@@ -592,37 +782,200 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             padding_side="left",
             add_special_tokens=False,
         )
-        prompt_ids, prompt_mask = (
-            prompt_inputs["input_ids"].to(device),
-            prompt_inputs["attention_mask"].to(device),
-        )
+        
+        # 🔧 手动修复attention_mask：从right padding转换为left padding
+        prompt_ids = prompt_inputs["input_ids"]
+        prompt_mask = prompt_inputs["attention_mask"]
+        
+        # 🔧 逐个样本检查并转换prompt padding
+        new_prompt_ids = []
+        new_prompt_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(prompt_ids, prompt_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                # 检测到RIGHT padding
+                first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                
+                if first_pad_idx > 0:  # 确认不是LEFT padding
+                    needs_conversion = True
+                    if idx == 0:
+                        print(f"⚠️ Prompt样本{idx}检测到RIGHT padding（第一个PAD在位置{first_pad_idx}），正在转换...")
+                    
+                    # 保持原始长度不变
+                    original_length = len(ids)
+                    content_ids = ids[:first_pad_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
+                    
+                    pad_token = self.processing_class.tokenizer.pad_token_id
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                    
+                    new_mask = torch.cat([
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
+                    
+                    new_prompt_ids.append(new_ids)
+                    new_prompt_mask.append(new_mask)
+                else:
+                    new_prompt_ids.append(ids)
+                    new_prompt_mask.append(mask)
+            else:
+                new_prompt_ids.append(ids)
+                new_prompt_mask.append(mask)
+        
+        if needs_conversion:
+            prompt_ids = torch.stack(new_prompt_ids)
+            prompt_mask = torch.stack(new_prompt_mask)
+            print(f"✅ Prompt转换完成：mask前5个={prompt_mask[0][:5].tolist()}，后5个={prompt_mask[0][-5:].tolist()}")
+            
+            # 验证转换后的数据（只在第1次）- 暂时禁用以节省内存
+            # if not hasattr(self, '_prompt_padding_validated'):
+            #     self._validate_padding(prompt_ids, prompt_mask, stage_name="Prompt转换后")
+            #     self._prompt_padding_validated = True
+        else:
+            print(f"✅ Prompt已经是LEFT padding")
+        
+        prompt_ids = prompt_ids.to(device)
+        prompt_mask = prompt_mask.to(device)
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
         if self.args.use_vllm:
+            import sys
+            print(f"🚀 [Rank {self.accelerator.process_index}] 进入VLLM生成分支")
+            sys.stdout.flush()
+            
             # First, have main process load weights if needed
+            # ⚠️  Step 0跳过权重加载：VLLM初始化时已经加载了checkpoint
             if self.state.global_step != self._last_loaded_step:
-                with unwrap_model_for_generation(
-                    self.model,
-                    self.accelerator,
-                    gather_deepspeed3_params = False,  # TODO: fix this, self.args.ds3_gather_for_generation,
-                ) as unwrapped_model:
-                    if is_compiled_module(unwrapped_model):
-                        state_dict = unwrapped_model._orig_mod.state_dict()
-                    else:
-                        state_dict = unwrapped_model.state_dict()
-                if self.accelerator.is_main_process:
-                    llm_model = (
-                        self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                    )
-                    llm_model.load_weights(state_dict.items())
-                self._last_loaded_step = self.state.global_step
+                if self.state.global_step == 0:
+                    # 第一步跳过，使用VLLM初始权重
+                    print(f"ℹ️  [Rank {self.accelerator.process_index}] Step 0: 跳过权重加载，使用VLLM初始权重")
+                    self._last_loaded_step = self.state.global_step
+                else:
+                    # 后续步骤：加载更新后的训练权重
+                    print(f"⚙️ [Rank {self.accelerator.process_index}] Step {self.state.global_step}: 需要加载更新的权重")
+                    sys.stdout.flush()
+                    
+                    try:
+                        # 🔧 关键修复：在unwrap前同步，确保所有进程的模型状态一致
+                        self.accelerator.wait_for_everyone()
+                        print(f"🔄 [Rank {self.accelerator.process_index}] 进入unwrap前同步完成")
+                        sys.stdout.flush()
+                        
+                        with unwrap_model_for_generation(
+                            self.model,
+                            self.accelerator,
+                            gather_deepspeed3_params = False,
+                        ) as unwrapped_model:
+                            if is_compiled_module(unwrapped_model):
+                                state_dict = unwrapped_model._orig_mod.state_dict()
+                            else:
+                                state_dict = unwrapped_model.state_dict()
+                        
+                        # 🔧 关键修复：在unwrap退出后立即同步，确保所有进程都完成re-wrap
+                        self.accelerator.wait_for_everyone()
+                        print(f"✅ [Rank {self.accelerator.process_index}] unwrap context退出后同步完成")
+                        sys.stdout.flush()
+                        
+                        if self.accelerator.is_main_process:
+                            # 🔧 清理state_dict的key（移除DDP/DeepSpeed/HuggingFace的包装前缀）
+                            cleaned_state_dict = {}
+                            
+                            for key, value in state_dict.items():
+                                clean_key = key
+                                
+                                # 移除所有可能的前缀（module., _orig_mod., model.）
+                                while True:
+                                    original = clean_key
+                                    if clean_key.startswith("module."):
+                                        clean_key = clean_key[7:]
+                                    if clean_key.startswith("_orig_mod."):
+                                        clean_key = clean_key[10:]
+                                    if clean_key.startswith("model."):
+                                        clean_key = clean_key[6:]
+                                    # 如果没有变化，说明清理完了
+                                    if clean_key == original:
+                                        break
+                                
+                                cleaned_state_dict[clean_key] = value
+                            
+                            print(f"⚙️  [Step {self.state.global_step}] 加载更新权重到VLLM ({len(cleaned_state_dict)} params)")
+                            
+                            # 打印前5个key用于调试（仅在第一次加载时）
+                            if self.state.global_step == 1 and len(cleaned_state_dict) > 0:
+                                print(f"   🔍 清理后的前5个keys（调试用）:")
+                                for i, key in enumerate(list(cleaned_state_dict.keys())[:5]):
+                                    print(f"      {i+1}. {key}")
+                            
+                            try:
+                                llm_model = (
+                                    self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                                )
+                                llm_model.load_weights(cleaned_state_dict.items())
+                                print(f"   ✅ 权重加载成功")
+                            except Exception as load_err:
+                                print(f"   ⚠️  权重加载失败: {load_err}")
+                                print(f"   💡 这通常不影响训练，VLLM会继续使用现有权重")
+                                print(f"   继续训练...")
+                        
+                        self._last_loaded_step = self.state.global_step
+                        
+                    except Exception as e:
+                        print(f"❌ [Rank {self.accelerator.process_index}] 权重处理失败: {e}")
+                        print(f"   继续使用VLLM现有权重")
+                        import traceback
+                        traceback.print_exc()
+                        self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_prompts_text = gather_object(prompts_text)
-            all_prompts = gather_object(prompts)
-            all_images = gather_object(images)
+            import sys
+            print(f"🔗 [Rank {self.accelerator.process_index}] 开始gather操作")
+            sys.stdout.flush()
+            
+            try:
+                all_prompts_text = self.gather_objects_via_tensors(prompts_text)
+                print(f"✅ [Rank {self.accelerator.process_index}] prompts_text gather完成")
+                sys.stdout.flush()
+                
+                all_prompts = self.gather_objects_via_tensors(prompts)
+                print(f"✅ [Rank {self.accelerator.process_index}] prompts gather完成")
+                sys.stdout.flush()
+                
+                all_images = self.gather_objects_via_tensors(images)
+                print(f"✅ [Rank {self.accelerator.process_index}] images gather完成")
+                sys.stdout.flush()
+            except Exception as gather_error:
+                print(f"❌ [Rank {self.accelerator.process_index}] gather操作失败: {gather_error}")
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+                # 确保所有进程都知道失败了
+                self.accelerator.wait_for_everyone()
+                raise
+            
+            # gather_objects_via_tensors 返回 [GPU0的数据, GPU1的数据, ...]
+            # 需要展平为一维列表
+            if isinstance(all_prompts_text, list) and len(all_prompts_text) > 0 and isinstance(all_prompts_text[0], list):
+                world_size = len(all_prompts_text)
+                samples_per_gpu = len(all_prompts_text[0])
+                print(f"ℹ️ 展平gathered数据: {world_size} 个GPU, 每个GPU {samples_per_gpu} 个输入")
+                
+                all_prompts_text = [item for sublist in all_prompts_text for item in sublist]
+                all_prompts = [item for sublist in all_prompts for item in sublist]
+                all_images = [item for sublist in all_images for item in sublist]
+                
+                total_inputs = len(all_prompts)
+                unique_samples = total_inputs // num_generations
+                print(f"   展平后: {total_inputs} 个输入 = {unique_samples} 个unique样本 × {num_generations} 次候选")
+            else:
+                print(f"ℹ️ Gathered数据无需展平: {len(all_prompts)} 个输入")
             # group into pairs
             all_multimodal_inputs = [
                 {"prompt": p, "multi_modal_data": {"image": i}}
@@ -631,6 +984,16 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             if self.max_prompt_length is None:
                 self.max_prompt_length = 2048
 
+            print(f"⚡ [Rank {self.accelerator.process_index}] 准备进入生成分支")
+            sys.stdout.flush()
+            
+            # 添加同步点：确保所有进程都到达这里
+            print(f"🔄 [Rank {self.accelerator.process_index}] 等待所有进程同步...")
+            sys.stdout.flush()
+            self.accelerator.wait_for_everyone()
+            print(f"✅ [Rank {self.accelerator.process_index}] 同步完成")
+            sys.stdout.flush()
+            
             if self.accelerator.is_main_process:
                 ## SU: for debug
                 for i, (prompt, image) in enumerate(zip(all_prompts, all_images)):
@@ -644,16 +1007,19 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     prompts = all_prompts,
                     images = all_images,
                     sampling_params = self.sampling_params,
-                    max_rounds = 6,
+                    max_rounds = 3,  # 从6改为3，减少超时风险
                     model_mode = "general",
                     controller_addr = self.controller_addr,
                 )
-                # SU: for debug
+                
+                print(f"\n✅ vllm_generate_with_tool_calls 返回成功")
+                print(f"   返回了 {len(tool_generation_output)} 个结果")
+                
+                # SU: for debug（简化输出）
                 for i, output in enumerate(tool_generation_output):
-                    print(f"Output {i}:")
-                    print(f"Model Outputs: {output['model_outputs']}")
-                    print(f"Tool Outputs: {output['tool_outputs']}")
+                    print(f"样本 {i}: {len(output['model_outputs'])} 轮输出, {len(output['tool_outputs'])} 次工具调用")
 
+                print(f"\n📊 正在处理输出数据...")
                 model_output_texts = [item["model_outputs"] for item in tool_generation_output]
                 num = 0
                 for item in tool_generation_output:
@@ -663,19 +1029,79 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                 self._metrics["ave_tool_num"].append(ave_tool_num)
 
                 model_output_ids = []
-                for item in tool_generation_output:
+                print(f"📝 处理 {len(tool_generation_output)} 个样本的输出IDs...")
+                for idx, item in enumerate(tool_generation_output):
                     all_outputs = []
+                    num_output_ids = len(item["model_output_ids"])
+                    print(f"   样本{idx}: {num_output_ids} 个输出ID列表")
                     for model_output_id in item["model_output_ids"]:
                         all_outputs.extend(model_output_id)
                     model_output_ids.append(all_outputs)
+                    print(f"   样本{idx}: 合并后共 {len(all_outputs)} 个tokens")
                 # completion_ids = [list(item["model_output_ids"]) for item in tool_generation_output]
                 completion_ids = [completion_list[:self.max_completion_length] for completion_list in model_output_ids]
+                print(f"✅ 数据处理完成，准备广播")
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 主进程if块即将结束")
             else:
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 非主进程进入else块")
                 completion_ids = [None] * len(all_prompts_text)
                 model_output_texts = [None] * len(all_prompts_text)
+                print(f"ℹ️ [Rank {self.accelerator.process_index}] 非主进程else块结束")
+                sys.stdout.flush()
             
-            completion_ids = broadcast_object_list(completion_ids, from_process=0)
-            model_output_texts = broadcast_object_list(model_output_texts, from_process=0)
+            # 所有进程都离开if/else块后，再次同步
+            print(f"🔄 [Rank {self.accelerator.process_index}] if/else块结束，准备同步...")
+            sys.stdout.flush()
+            self.accelerator.wait_for_everyone()
+            print(f"✅ [Rank {self.accelerator.process_index}] if/else块同步完成")
+            sys.stdout.flush()
+            
+            print(f"\n📡 [Rank {self.accelerator.process_index}] 开始广播数据到所有GPU...")
+            sys.stdout.flush()
+            
+            try:
+                comp_len = len(completion_ids) if completion_ids else 0
+                text_len = len(model_output_texts) if model_output_texts else 0
+                print(f"   completion_ids: {comp_len} 个")
+                print(f"   model_output_texts: {text_len} 个")
+            except Exception as e:
+                print(f"   ⚠️ 获取长度时出错: {e}")
+            sys.stdout.flush()
+            
+            print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 completion_ids...")
+            sys.stdout.flush()
+            
+            # 使用自定义的tensor-based broadcast替代默认的broadcast_object_list
+            # 因为默认的可能导致超时
+            if self.accelerator.is_main_process:
+                broadcast_completion_ids = completion_ids
+            else:
+                broadcast_completion_ids = [None] * len(all_prompts_text)
+            
+            # 使用gather+展平实现broadcast效果
+            gathered_completion_ids = self.gather_objects_via_tensors(broadcast_completion_ids)
+            if isinstance(gathered_completion_ids, list) and len(gathered_completion_ids) > 0:
+                # 主进程的数据在gathered_completion_ids[0]
+                completion_ids = gathered_completion_ids[0] if gathered_completion_ids[0] is not None else completion_ids
+            
+            print(f"✅ [Rank {self.accelerator.process_index}] completion_ids 广播完成")
+            sys.stdout.flush()
+            
+            print(f"🔄 [Rank {self.accelerator.process_index}] 开始广播 model_output_texts...")
+            sys.stdout.flush()
+            
+            # 同样处理model_output_texts
+            if self.accelerator.is_main_process:
+                broadcast_texts = model_output_texts
+            else:
+                broadcast_texts = [None] * len(all_prompts_text)
+            
+            gathered_texts = self.gather_objects_via_tensors(broadcast_texts)
+            if isinstance(gathered_texts, list) and len(gathered_texts) > 0:
+                model_output_texts = gathered_texts[0] if gathered_texts[0] is not None else model_output_texts
+            
+            print(f"✅ [Rank {self.accelerator.process_index}] model_output_texts 广播完成")
+            sys.stdout.flush()
             process_slice = slice(
                 self.accelerator.process_index * len(prompts),
                 (self.accelerator.process_index + 1) * len(prompts),
@@ -687,9 +1113,23 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             completion_ids = [
                 torch.tensor(ids, device=device) for ids in completion_ids
             ]
-            completion_ids = pad(
-                completion_ids, padding_value=self.processing_class.pad_token_id
-            )
+            
+            # 🔧 自定义LEFT padding（trl的pad只支持right padding）
+            # completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)  # RIGHT padding
+            max_len = max(len(ids) for ids in completion_ids)
+            padded_completion_ids = []
+            for ids in completion_ids:
+                pad_len = max_len - len(ids)
+                if pad_len > 0:
+                    # LEFT padding: [PAD, PAD, ..., content]
+                    padding = torch.full((pad_len,), self.processing_class.pad_token_id, dtype=ids.dtype, device=ids.device)
+                    padded_ids = torch.cat([padding, ids], dim=0)
+                else:
+                    padded_ids = ids
+                padded_completion_ids.append(padded_ids)
+            completion_ids = torch.stack(padded_completion_ids)
+            print(f"✅ completion_ids使用LEFT padding: shape={completion_ids.shape}")
+            
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             raise ValueError("Only vLLM generation is supported in this version ")
@@ -697,18 +1137,103 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         # below are the same with yifan's code
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
+        is_pad = completion_ids == self.processing_class.pad_token_id
         device = self.accelerator.device
+        
+        # 🔧 修复：对于LEFT padding，需要排除前面的PAD token
+        # 找到第一个非PAD token的位置（即内容开始的位置）
+        sequence_indices = torch.arange(completion_ids.size(1), device=device).expand(
+            completion_ids.size(0), -1
+        )
+        
+        # 找到每个序列第一个非PAD的位置
+        has_pad = is_pad.any(dim=1)
+        content_start_idx = torch.zeros(completion_ids.size(0), dtype=torch.long, device=device)
+        if has_pad.any():
+            # 找到最后一个PAD的位置 + 1
+            for i in range(completion_ids.size(0)):
+                if has_pad[i]:
+                    pad_indices = (is_pad[i] == 1).nonzero(as_tuple=True)[0]
+                    if len(pad_indices) > 0:
+                        # 假设LEFT padding，所有PAD在前面连续
+                        content_start_idx[i] = pad_indices[-1] + 1
+        
+        # 找到EOS token的位置
         eos_idx = torch.full(
             (is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device
         )
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(
-            is_eos.size(0), -1
-        )
-        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+        
+        # completion_mask: 1表示有效内容（content_start到eos之间）
+        completion_mask = ((sequence_indices >= content_start_idx.unsqueeze(1)) & 
+                          (sequence_indices <= eos_idx.unsqueeze(1))).int()
+        print(f"✅ completion_mask已调整为LEFT padding兼容: shape={completion_mask.shape}")
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B*G, P+C)
+        
+        # 🔧 关键修复：拼接后需要重新调整为LEFT padding
+        # 因为completion可能是RIGHT padding，拼接后会产生混合padding
+        print(f"🔍 拼接后检查: prompt_completion_ids shape = {prompt_completion_ids.shape}")
+        print(f"   attention_mask[0]前5个: {attention_mask[0][:5].tolist()}")
+        print(f"   attention_mask[0]后5个: {attention_mask[0][-5:].tolist()}")
+        
+        # 🔧 逐个样本检查并转换（不能只检查第1个样本！）
+        new_ids = []
+        new_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(prompt_completion_ids, attention_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                # 检测到RIGHT/MIXED padding
+                first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                
+                if first_zero_idx > 0:  # 确认不是LEFT padding
+                    needs_conversion = True
+                    if idx == 0:  # 只打印第1个需要转换的样本
+                        print(f"⚠️ 样本{idx}检测到非LEFT padding（第一个0在位置{first_zero_idx}），正在转换...")
+                    
+                    # 保持原始长度不变
+                    original_length = len(ids)
+                    content_ids = ids[:first_zero_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
+                    
+                    # 创建left padding
+                    pad_token = self.processing_class.pad_token_id
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_id = torch.cat([padding_ids, content_ids], dim=0)
+                    
+                    new_m = torch.cat([
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
+                    
+                    new_ids.append(new_id)
+                    new_mask.append(new_m)
+                else:
+                    # 已经是LEFT padding
+                    new_ids.append(ids)
+                    new_mask.append(mask)
+            else:
+                # 无padding或已经是LEFT padding
+                new_ids.append(ids)
+                new_mask.append(mask)
+        
+        if needs_conversion:
+            prompt_completion_ids = torch.stack(new_ids)
+            attention_mask = torch.stack(new_mask)
+            print(f"✅ 转换完成: mask前5个={attention_mask[0][:5].tolist()}，后5个={attention_mask[0][-5:].tolist()}")
+            
+            # 验证拼接后的数据（只在第1次）- 暂时禁用以节省内存
+            # if not hasattr(self, '_concat_padding_validated'):
+            #     self._validate_padding(prompt_completion_ids, attention_mask, stage_name="拼接后转换完成")
+            #     self._concat_padding_validated = True
+        else:
+            print(f"✅ 整个batch已经是LEFT padding")
+        
         # pixel_values = prompt_inputs["pixel_values"].repeat_interleave(
         #     self.num_generations, dim=0
         # )
@@ -734,9 +1259,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     logits_to_keep,
                 )
             else:
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
+                # 🔧 Bug修复：正确使用unwrap_model_for_generation context manager
+                # 确保模型在unwrap后能正确re-wrap，避免DeepSpeed状态丢失
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                with unwrapped_model.disable_adapter():
                     ref_per_token_logps = self._get_per_token_logps(
-                        self.model,
+                        unwrapped_model,  # ← 使用unwrapped model
                         prompt_completion_ids,
                         attention_mask,
                         pixel_values,
@@ -773,13 +1301,72 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     ]
                 else:
                     texts = [p + c for p, c in zip(prompts, completions)]
+                
+                # 显式设置reward tokenizer的padding方向
+                if hasattr(reward_processing_class, 'tokenizer'):
+                    reward_processing_class.tokenizer.padding_side = "left"
+                if hasattr(reward_processing_class, 'padding_side'):
+                    reward_processing_class.padding_side = "left"
+                
                 reward_inputs = reward_processing_class(
                     texts,
                     return_tensors="pt",
                     padding=True,
-                    padding_side="right",
+                    padding_side="left",  # 修改为left，适配Flash Attention
                     add_special_tokens=False,
                 )
+                
+                # 🔧 手动修复reward model的attention_mask（逐个样本检查）
+                if "attention_mask" in reward_inputs:
+                    reward_mask = reward_inputs["attention_mask"]
+                    reward_ids = reward_inputs["input_ids"]
+                    
+                    new_reward_ids = []
+                    new_reward_mask = []
+                    needs_conversion = False
+                    
+                    for idx, (ids, mask) in enumerate(zip(reward_ids, reward_mask)):
+                        has_padding = (mask == 0).any().item()
+                        
+                        if has_padding and mask[0] == 1:
+                            first_pad_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                            
+                            if first_pad_idx > 0:
+                                needs_conversion = True
+                                if idx == 0:
+                                    print(f"⚠️ [Reward Model] 样本{idx}检测到RIGHT padding，正在转换...")
+                                
+                                # 保持原始长度不变
+                                original_length = len(ids)
+                                content_ids = ids[:first_pad_idx]
+                                content_length = len(content_ids)
+                                padding_needed = original_length - content_length
+                                
+                                pad_token = reward_processing_class.tokenizer.pad_token_id
+                                padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype)
+                                new_ids = torch.cat([padding_ids, content_ids], dim=0)
+                                
+                                new_mask = torch.cat([
+                                    torch.zeros(padding_needed, dtype=mask.dtype),
+                                    torch.ones(content_length, dtype=mask.dtype),
+                                ], dim=0)
+                                
+                                new_reward_ids.append(new_ids)
+                                new_reward_mask.append(new_mask)
+                            else:
+                                new_reward_ids.append(ids)
+                                new_reward_mask.append(mask)
+                        else:
+                            new_reward_ids.append(ids)
+                            new_reward_mask.append(mask)
+                    
+                    if needs_conversion:
+                        reward_inputs["input_ids"] = torch.stack(new_reward_ids)
+                        reward_inputs["attention_mask"] = torch.stack(new_reward_mask)
+                        print(f"✅ [Reward Model] 转换完成")
+                    else:
+                        print(f"✅ [Reward Model] 已经是LEFT padding")
+                
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[
@@ -869,6 +1456,55 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
         )
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        
+        # 🔧 [compute_loss] 关键修复：拼接后转换为LEFT padding（逐个样本检查）
+        print(f"🔍 [compute_loss] 拼接后检查: input_ids shape = {input_ids.shape}")
+        
+        new_ids = []
+        new_mask = []
+        needs_conversion = False
+        
+        for idx, (ids, mask) in enumerate(zip(input_ids, attention_mask)):
+            has_padding = (mask == 0).any().item()
+            
+            if has_padding and mask[0] == 1:
+                first_zero_idx = (mask == 0).nonzero(as_tuple=True)[0][0].item()
+                
+                if first_zero_idx > 0:
+                    needs_conversion = True
+                    if idx == 0:
+                        print(f"⚠️ [compute_loss] 样本{idx}检测到非LEFT padding，正在转换...")
+                    
+                    # 保持原始长度不变
+                    original_length = len(ids)
+                    content_ids = ids[:first_zero_idx]
+                    content_length = len(content_ids)
+                    padding_needed = original_length - content_length
+                    
+                    pad_token = self.processing_class.pad_token_id
+                    padding_ids = torch.full((padding_needed,), pad_token, dtype=ids.dtype, device=ids.device)
+                    new_id = torch.cat([padding_ids, content_ids], dim=0)
+                    new_m = torch.cat([
+                        torch.zeros(padding_needed, dtype=mask.dtype, device=mask.device),
+                        torch.ones(content_length, dtype=mask.dtype, device=mask.device),
+                    ], dim=0)
+                    
+                    new_ids.append(new_id)
+                    new_mask.append(new_m)
+                else:
+                    new_ids.append(ids)
+                    new_mask.append(mask)
+            else:
+                new_ids.append(ids)
+                new_mask.append(mask)
+        
+        if needs_conversion:
+            input_ids = torch.stack(new_ids)
+            attention_mask = torch.stack(new_mask)
+            print(f"✅ [compute_loss] 转换完成")
+        else:
+            print(f"✅ [compute_loss] 整个batch已经是LEFT padding")
+        
         pixel_values = inputs["pixel_values"].to(dtype=torch.bfloat16)
         image_grid_thw = inputs["image_grid_thw"]
         logits_to_keep = completion_ids.size(

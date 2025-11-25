@@ -228,6 +228,8 @@ class Qwen2VLGRPOTrainer(Trainer):
                 pad_token_id = processing_class.tokenizer.pad_token_id
                 processing_class.pad_token_id = pad_token_id
                 processing_class.eos_token_id = processing_class.tokenizer.eos_token_id
+                # 设置padding方向为left（Flash Attention要求）
+                processing_class.tokenizer.padding_side = "left"
                 if "Qwen2-VL" in model_id:
                     processing_class.image_processor.max_pixels = max_pixels
                     processing_class.image_processor.min_pixels = min_pixels
@@ -470,7 +472,7 @@ class Qwen2VLGRPOTrainer(Trainer):
                 else:
                     texts = [p + c for p, c in zip(prompts, completions)]
                 reward_inputs = reward_processing_class(
-                    texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
+                    texts, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False  # 修改为left，适配Flash Attention
                 )
                 reward_inputs = super()._prepare_inputs(reward_inputs)
                 with torch.inference_mode():

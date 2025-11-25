@@ -193,6 +193,8 @@ def parse_tool_config(
             
         except Exception as e:
             print(f"Error extracting actions list: {e}")
+            # 可选：显示导致错误的内容（前200字符）
+            # print(f"  Failed content: {actions_str[:200] if 'actions_str' in locals() else text[:200]}")
             return None
     
     if not model_response:
@@ -664,26 +666,64 @@ def vllm_generate_with_tool_calls(
     tool_manager = ToolManager(controller_addr)
     tool_manager.available_tools = [tool for tool in tool_manager.available_tools if tool not in ['crop', 'drawline']]
     print(f"controller_addr: {controller_addr}")
-    print(f"Avaliable tools are {tool_manager.available_tools}")
-    miss_tool = []
-    for tool in ["ZoomInSubfigure","DrawHorizontalLineByY","OCR","DrawVerticalLineByX","SegmentRegionAroundPoint","Point"]:
-        if tool not in tool_manager.available_tools:
-            miss_tool.append(tool)
-    if len(miss_tool) == 0:
-        print("All tools are called successfully")
+    print(f"Available tools: {tool_manager.available_tools}")
+    
+    # 检查工具（区分在线和离线工具）
+    online_required = ["ZoomInSubfigure", "DrawHorizontalLineByY", "DrawVerticalLineByX"]
+    offline_tools = ["OCR"]  # OCR通常有本地实现
+    
+    miss_online = [t for t in online_required if t not in tool_manager.available_tools]
+    
+    if len(miss_online) == 0:
+        print(f"✅ 所有在线工具已加载: {online_required}")
     else:
-        print(f"Not all tools is called successfully, missing tool {miss_tool}")
+        print(f"⚠️ 缺少在线工具: {miss_online}")
+    
+    print(f"ℹ️  离线工具（本地实现）: {offline_tools}")
+    print(f"ℹ️  可用在线工具: {tool_manager.available_tools}")
 
     # image_tool_manager = ImageToolManager()
     # {"prompt": p, "multi_modal_data": {"image": i}}
     
     ## build data
+    
+    # ===== 数据格式验证（仅调试，不修改数据） =====
+    import json
+    
+    print("\n" + "="*80)
+    print("【vllm_generate_with_tool_calls 输入数据】")
+    print("="*80)
+    print(f"prompts 数量: {len(prompts)}")
+    print(f"images 数量: {len(images)}")
+    
+    if len(prompts) > 0:
+        print(f"\n第一个prompt结构:")
+        print(f"  类型: {type(prompts[0])}")
+        if isinstance(prompts[0], list) and len(prompts[0]) > 0:
+            print(f"  长度: {len(prompts[0])}")
+            print(f"  prompts[0][0] 类型: {type(prompts[0][0])}")
+            if isinstance(prompts[0][0], dict):
+                print(f"  ✅ 格式正确: prompts[0][0] 是字典")
+                print(f"     keys: {list(prompts[0][0].keys())}")
+            else:
+                print(f"  ❌ 格式错误: prompts[0][0] 应该是字典，实际是 {type(prompts[0][0])}")
+    
+    if len(images) > 0:
+        print(f"\n第一个image:")
+        print(f"  类型: {type(images[0])}")
+        if hasattr(images[0], 'mode'):
+            print(f"  ✅ 格式正确: PIL图像, mode={images[0].mode}, size={images[0].size}")
+        else:
+            print(f"  ❌ 格式错误: 应该是PIL.Image")
+    
+    print("="*80 + "\n")
+    # ===== 验证结束 =====
 
     
     input_data = []
 
     
-    for prompt, image in zip(prompts, images):
+    for idx, (prompt, image) in enumerate(zip(prompts, images)):
         current_image = image
         if current_image:
             if current_image.mode in ("RGBA", "LA", "P"):
@@ -732,11 +772,27 @@ def vllm_generate_with_tool_calls(
 
     # breakpoint()    
     ## Vllm inference with tool calling
-    for _ in range(max_rounds):
+    import time
+    total_start_time = time.time()
+    max_total_time = 1500  # 25分钟总超时（给broadcast留5分钟）
+    
+    for round_idx in range(max_rounds):
+        # 检查总时间
+        elapsed = time.time() - total_start_time
+        if elapsed > max_total_time:
+            print(f"⚠️ 总时间超过 {max_total_time}秒，提前终止")
+            break
+        
+        print(f"\n{'='*60}")
+        print(f"🔄 Round {round_idx + 1}/{max_rounds} (已用时: {elapsed:.1f}秒)")
+        print(f"{'='*60}")
         input_conversations = [item["conversations"] for item in input_data if item["status"] == "processing"]
         input_idxs = [idx for idx, item in enumerate(input_data) if item["status"] == "processing"]
         try:
             # breakpoint()
+            round_start = time.time()
+            print(f"📝 开始VLLM生成 ({len(input_conversations)} 个对话)...")
+            
             outputs = vllm_model.chat(
                 input_conversations,
                 sampling_params = sampling_params,
@@ -744,11 +800,27 @@ def vllm_generate_with_tool_calls(
             )
             output_texts = [output.outputs[0].text for output in outputs]
             output_idss = [output.outputs[0].token_ids for output in outputs]
+            
+            print(f"✅ VLLM生成完成，耗时: {time.time() - round_start:.1f}秒")
         except Exception as e:
             # breakpoint()
-            print(f"[vllm generation] {e}")
+            print(f"❌ [vllm generation] {e}")
             output_texts = ["Model generation error"] * len(input_conversations)
-            output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
+            
+            # 使用EOS token作为错误占位符（更通用的做法）
+            # 尝试从vllm_model获取tokenizer
+            try:
+                if hasattr(vllm_model, 'llm_engine'):
+                    tokenizer = vllm_model.llm_engine.tokenizer.tokenizer
+                    error_token_ids = tokenizer.encode("Model generation error", add_special_tokens=False)
+                    output_idss = [tuple(error_token_ids)] * len(input_conversations)
+                else:
+                    # 回退到硬编码（但添加注释说明）
+                    # 这些token IDs对应Qwen2-VL的 "Model generation error" + <|im_end|>
+                    output_idss = [(1712, 9471, 1465, 151645)] * len(input_conversations)
+            except:
+                # 最后的回退：使用EOS token
+                output_idss = [(151645,)] * len(input_conversations)  # <|im_end|> token
             
         ## update data
         for input_idx, output_text, output_ids in zip(input_idxs, output_texts, output_idss):
@@ -776,28 +848,43 @@ def vllm_generate_with_tool_calls(
                 input_data[input_idx]["tool_cfgs"].append(tool_cfg)
                 original_api_name = tool_cfg[0].get("API_name").lower() 
                 api_params = tool_cfg[0].get("API_params", {})
+                
+                # 工具名称映射（移除了Point和SegmentRegionAroundPoint）
                 tool_name_mapping = {
                     'drawhorizontallinebyy': 'DrawHorizontalLineByY',
                     'zoominsubfigure': 'ZoomInSubfigure',
                     'drawverticallinebyx': 'DrawVerticalLineByX',
-                    'segmentregionaroundpoint': 'SegmentRegionAroundPoint',
-                    'point': 'Point',
-                    'ocr': 'OCR'
+                    'ocr': 'OCR',
+                    'terminate': 'Terminate'
                 }
                 api_name = tool_name_mapping.get(original_api_name)
+                
+                # 如果模型尝试调用不存在的工具，跳过
+                if api_name is None:
+                    print(f"⚠️ 未知工具: {original_api_name}，跳过")
+                    input_data[input_idx]["status"] = "finished"
+                    continue
 
                 # breakpoint()
                 # if "Terminate" in output_text:
                 #     input_data[input_idx]["status"] = "finished"
                 #     continue
                 
-                # print(f"Tool calling: {api_name}")
                 # Call the tool using the tool manager
                 # breakpoint()
                 if "param" in api_params:
                     p = api_params["param"]
-                    print(f"Tool name: {api_name}, params: {p}")
-                tool_result = tool_manager.call_tool(api_name, api_params)
+                    print(f"🔧 调用工具: {api_name}, params: {p}")
+                else:
+                    print(f"🔧 调用工具: {api_name}")
+                
+                tool_start = time.time()
+                try:
+                    tool_result = tool_manager.call_tool(api_name, api_params)
+                    print(f"✅ 工具调用成功，耗时: {time.time() - tool_start:.2f}秒")
+                except Exception as e:
+                    print(f"❌ 工具调用失败: {e}")
+                    tool_result = {"error": str(e)}
                 # Append the tool call output to the conversation history
                 input_data[input_idx]["tool_outputs"].append(tool_result)
                 # Process the tool result and update the conversation
@@ -810,7 +897,27 @@ def vllm_generate_with_tool_calls(
                     input_data_item = input_data[input_idx]
                 )
 
-    output_ids = [item["model_output_ids"][-1] for item in input_data]
+    # 收集输出IDs（添加错误处理）
+    print(f"\n📊 正在收集输出数据...")
+    output_ids = []
+    for idx, item in enumerate(input_data):
+        try:
+            if len(item["model_output_ids"]) > 0:
+                output_ids.append(item["model_output_ids"][-1])
+            else:
+                print(f"⚠️ 样本 {idx} 没有输出IDs，使用空列表")
+                output_ids.append([])
+        except Exception as e:
+            print(f"❌ 处理样本 {idx} 时出错: {e}")
+            output_ids.append([])
+    
+    print(f"✅ 收集了 {len(output_ids)} 个输出")
+    
+    total_time = time.time() - total_start_time
+    print(f"\n{'='*60}")
+    print(f"🏁 所有轮次完成，总耗时: {total_time:.1f}秒 ({total_time/60:.1f}分钟)")
+    print(f"   处理了 {len(input_data)} 个样本")
+    print(f"{'='*60}\n")
 
     return input_data
 

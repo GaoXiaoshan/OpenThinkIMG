@@ -179,16 +179,14 @@ reward_funcs_registry = {
 
 SYSTEM_PROMPT = """You are a visual assistant capable of generating and solving steps for chart-based reasoning. Your goal is to answer chart-related questions. You can rely on your own capabilities or use external tools to assist in solving. Here are the available actions:
 - **OCR**: Extracts text from an image. Example: `{"name": "OCR", "arguments": {"image": "img_1"}}`
-- **Point**: Identifies a point in the image based on description and returns coordinates. Example: `{"name": "Point", "arguments": {"image": "img_1", "param": "x-axis value 1970"}}`
 - **ZoomInSubfigure**: Crops the image to the specified subfigure. Example: `{"name": "ZoomInSubfigure", "arguments": {"image": "img_1", "param": "Downstream vs. Concept: Toy"}}`
-- **SegmentRegionAroundPoint**: Segments a region around a given point. Example: `{"name": "SegmentRegionAroundPoint", "arguments": {"image": "img_1", "param": "x=\"21.5\" y=\"28.5\""}}`
 - **DrawHorizontalLineByY**: Draws a horizontal line at a given y-coordinate. Example: `{"name": "DrawHorizontalLineByY", "arguments": {"image": "img_1", "param": "y=28.5"}}`
 - **DrawVerticalLineByX**: Draws a vertical line at a given x-coordinate. Example: `{"name": "DrawVerticalLineByX", "arguments": {"image": "img_1", "param": "x=21.5"}}`
 - **Terminate**: Ends the task and provides the final answer. Example: `{"name": "Terminate", "arguments": {"ans": "1985"}}`
 
 To solve the problem:
 1. Select actions from the provided tools list, combining them logically and building on previous steps. Call one action at a time, using its output for the next.
-2. To use `SegmentRegionAroundPoint`, `DrawHorizontalLineByY`, or `DrawVerticalLineByX`, first call "Point" to get coordinates for further actions.
+2. Use the available tools to analyze charts and provide accurate answers.
 
 Your output should be in a strict JSON format as follows:
 {"thought": "the reasoning process", "actions": [{"name": "action", "arguments": {"argument1": "value1", "argument2": "value2"}}]}
@@ -203,7 +201,7 @@ def main(script_args, training_args, model_args):
     if os.path.isdir(training_args.output_dir):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
+        print(f"✅ Checkpoint detected, resuming training at {last_checkpoint}")
 
     # Get reward functions
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
@@ -266,13 +264,26 @@ def main(script_args, training_args, model_args):
 
     # breakpoint()
     
+    # 打印数据集信息
+    train_dataset = dataset[script_args.dataset_train_split]
+    print("\n" + "="*80)
+    print("【数据集信息】")
+    print("="*80)
+    print(f"训练集大小: {len(train_dataset)} 个样本")
+    print(f"训练集字段: {train_dataset.column_names}")
+    print(f"per_device_train_batch_size: {training_args.per_device_train_batch_size}")
+    print(f"num_return_sequences (生成候选数): {training_args.num_return_sequences if hasattr(training_args, 'num_return_sequences') else 'N/A'}")
+    print(f"gradient_accumulation_steps: {training_args.gradient_accumulation_steps}")
+    print(f"理论上每个GPU的输入数: {training_args.per_device_train_batch_size * (training_args.num_return_sequences if hasattr(training_args, 'num_return_sequences') else 1)}")
+    print("="*80 + "\n")
+    
     if script_args.use_tool:
         trainer_cls = Qwen2VLGRPOToolTrainer if not training_args.use_vllm else Qwen2VLGRPOToolVLLMTrainer
         trainer = trainer_cls(
             model=model_args.model_name_or_path,
             reward_funcs=reward_funcs,
             args=training_args,
-            train_dataset=dataset[script_args.dataset_train_split],
+            train_dataset=train_dataset,
             eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
             peft_config=get_peft_config(model_args),
             attn_implementation=model_args.attn_implementation,
@@ -286,7 +297,7 @@ def main(script_args, training_args, model_args):
             model=model_args.model_name_or_path,
             reward_funcs=reward_funcs,
             args=training_args,
-            train_dataset=dataset[script_args.dataset_train_split],
+            train_dataset=train_dataset,
             eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
             peft_config=get_peft_config(model_args),
             attn_implementation=model_args.attn_implementation,
@@ -297,17 +308,14 @@ def main(script_args, training_args, model_args):
 
     # Initialize the GRPO trainer
 
-
-    # Train and push the model to the Hub
-    trainer.train()
-
-    # Su: add the train from the saved checkpoint
-
+    # Determine checkpoint for resuming
     checkpoint = None
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
     elif last_checkpoint is not None:
         checkpoint = last_checkpoint
+
+    # Train and push the model to the Hub
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
 
     # Save and push to hub
