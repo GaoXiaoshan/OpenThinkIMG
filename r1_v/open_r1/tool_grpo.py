@@ -308,17 +308,14 @@ def main(script_args, training_args, model_args):
 
     # Initialize the GRPO trainer
 
-
-    # Train and push the model to the Hub
-    trainer.train()
-
-    # Su: add the train from the saved checkpoint
-
+    # Determine checkpoint for resuming
     checkpoint = None
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
     elif last_checkpoint is not None:
         checkpoint = last_checkpoint
+
+    # Train and push the model to the Hub
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
 
     # Save and push to hub

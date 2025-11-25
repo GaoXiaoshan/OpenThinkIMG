@@ -864,6 +864,11 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     sys.stdout.flush()
                     
                     try:
+                        # 🔧 关键修复：在unwrap前同步，确保所有进程的模型状态一致
+                        self.accelerator.wait_for_everyone()
+                        print(f"🔄 [Rank {self.accelerator.process_index}] 进入unwrap前同步完成")
+                        sys.stdout.flush()
+                        
                         with unwrap_model_for_generation(
                             self.model,
                             self.accelerator,
@@ -873,6 +878,11 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                 state_dict = unwrapped_model._orig_mod.state_dict()
                             else:
                                 state_dict = unwrapped_model.state_dict()
+                        
+                        # 🔧 关键修复：在unwrap退出后立即同步，确保所有进程都完成re-wrap
+                        self.accelerator.wait_for_everyone()
+                        print(f"✅ [Rank {self.accelerator.process_index}] unwrap context退出后同步完成")
+                        sys.stdout.flush()
                         
                         if self.accelerator.is_main_process:
                             # 🔧 清理state_dict的key（移除DDP/DeepSpeed/HuggingFace的包装前缀）
@@ -922,17 +932,26 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             print(f"🔗 [Rank {self.accelerator.process_index}] 开始gather操作")
             sys.stdout.flush()
             
-            all_prompts_text = self.gather_objects_via_tensors(prompts_text)
-            print(f"✅ [Rank {self.accelerator.process_index}] prompts_text gather完成")
-            sys.stdout.flush()
-            
-            all_prompts = self.gather_objects_via_tensors(prompts)
-            print(f"✅ [Rank {self.accelerator.process_index}] prompts gather完成")
-            sys.stdout.flush()
-            
-            all_images = self.gather_objects_via_tensors(images)
-            print(f"✅ [Rank {self.accelerator.process_index}] images gather完成")
-            sys.stdout.flush()
+            try:
+                all_prompts_text = self.gather_objects_via_tensors(prompts_text)
+                print(f"✅ [Rank {self.accelerator.process_index}] prompts_text gather完成")
+                sys.stdout.flush()
+                
+                all_prompts = self.gather_objects_via_tensors(prompts)
+                print(f"✅ [Rank {self.accelerator.process_index}] prompts gather完成")
+                sys.stdout.flush()
+                
+                all_images = self.gather_objects_via_tensors(images)
+                print(f"✅ [Rank {self.accelerator.process_index}] images gather完成")
+                sys.stdout.flush()
+            except Exception as gather_error:
+                print(f"❌ [Rank {self.accelerator.process_index}] gather操作失败: {gather_error}")
+                import traceback
+                traceback.print_exc()
+                sys.stdout.flush()
+                # 确保所有进程都知道失败了
+                self.accelerator.wait_for_everyone()
+                raise
             
             # gather_objects_via_tensors 返回 [GPU0的数据, GPU1的数据, ...]
             # 需要展平为一维列表
