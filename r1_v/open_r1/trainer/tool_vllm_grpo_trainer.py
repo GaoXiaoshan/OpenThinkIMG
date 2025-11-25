@@ -908,6 +908,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                             
                             print(f"⚙️  [Step {self.state.global_step}] 加载更新权重到VLLM ({len(cleaned_state_dict)} params)")
                             
+                            # 打印前5个key用于调试（仅在第一次加载时）
+                            if self.state.global_step == 1 and len(cleaned_state_dict) > 0:
+                                print(f"   🔍 清理后的前5个keys（调试用）:")
+                                for i, key in enumerate(list(cleaned_state_dict.keys())[:5]):
+                                    print(f"      {i+1}. {key}")
+                            
                             try:
                                 llm_model = (
                                     self.llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -916,7 +922,8 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                 print(f"   ✅ 权重加载成功")
                             except Exception as load_err:
                                 print(f"   ⚠️  权重加载失败: {load_err}")
-                                print(f"   继续使用VLLM的旧权重进行生成")
+                                print(f"   💡 这通常不影响训练，VLLM会继续使用现有权重")
+                                print(f"   继续训练...")
                         
                         self._last_loaded_step = self.state.global_step
                         
