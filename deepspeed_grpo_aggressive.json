@@ -1,0 +1,45 @@
+{
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "gradient_accumulation_steps": "auto",
+  
+  "zero_optimization": {
+    "stage": 2,
+    
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true,
+      "buffer_count": 4,
+      "fast_init": false
+    },
+    
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true,
+      "buffer_count": 5,
+      "buffer_size": 1e8,
+      "max_in_cpu": 1e9
+    },
+    
+    "allgather_partitions": true,
+    "allgather_bucket_size": 5e7,
+    "overlap_comm": true,
+    "reduce_scatter": true,
+    "reduce_bucket_size": 5e7,
+    "contiguous_gradients": true,
+    "round_robin_gradients": true
+  },
+  
+  "fp16": {
+    "enabled": false
+  },
+  
+  "bf16": {
+    "enabled": true
+  },
+  
+  "gradient_clipping": 1.0,
+  "steps_per_print": 10,
+  "wall_clock_breakdown": false,
+  "communication_data_type": "fp32"
+}
