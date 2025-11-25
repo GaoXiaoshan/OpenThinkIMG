@@ -864,11 +864,47 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                         state_dict = unwrapped_model._orig_mod.state_dict()
                     else:
                         state_dict = unwrapped_model.state_dict()
+                
+                # 🔧 修复DeepSpeed与VLLM的兼容性：清理state_dict的key
+                # DeepSpeed可能添加"module."前缀或其他包装
                 if self.accelerator.is_main_process:
+                    cleaned_state_dict = {}
+                    removed_prefixes_count = {"module.": 0, "_orig_mod.": 0}
+                    
+                    for key, value in state_dict.items():
+                        # 移除可能的前缀
+                        clean_key = key
+                        if clean_key.startswith("module."):
+                            clean_key = clean_key[7:]  # 移除"module."
+                            removed_prefixes_count["module."] += 1
+                        if clean_key.startswith("_orig_mod."):
+                            clean_key = clean_key[10:]  # 移除"_orig_mod."
+                            removed_prefixes_count["_orig_mod."] += 1
+                        cleaned_state_dict[clean_key] = value
+                    
+                    print(f"🔧 [Rank {self.accelerator.process_index}] 清理state_dict:")
+                    print(f"   原始keys: {len(state_dict)}")
+                    print(f"   清理后keys: {len(cleaned_state_dict)}")
+                    if removed_prefixes_count["module."] > 0:
+                        print(f"   移除了 {removed_prefixes_count['module.']} 个 'module.' 前缀")
+                    if removed_prefixes_count["_orig_mod."] > 0:
+                        print(f"   移除了 {removed_prefixes_count['_orig_mod.']} 个 '_orig_mod.' 前缀")
+                    
+                    # 验证关键参数是否存在
+                    critical_keys = ['visual.patch_embed.proj.weight', 'model.embed_tokens.weight']
+                    for ckey in critical_keys:
+                        if ckey in cleaned_state_dict:
+                            print(f"   ✅ 找到关键参数: {ckey}")
+                        else:
+                            # 搜索可能的匹配
+                            matching_keys = [k for k in cleaned_state_dict.keys() if ckey.split('.')[-1] in k]
+                            if matching_keys:
+                                print(f"   ⚠️  未找到 {ckey}，但找到类似的: {matching_keys[:3]}")
+                    
                     llm_model = (
                         self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                     )
-                    llm_model.load_weights(state_dict.items())
+                    llm_model.load_weights(cleaned_state_dict.items())
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
