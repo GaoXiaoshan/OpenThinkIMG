@@ -1252,9 +1252,12 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                     logits_to_keep,
                 )
             else:
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
+                # 🔧 Bug修复：正确使用unwrap_model_for_generation context manager
+                # 确保模型在unwrap后能正确re-wrap，避免DeepSpeed状态丢失
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                with unwrapped_model.disable_adapter():
                     ref_per_token_logps = self._get_per_token_logps(
-                        self.model,
+                        unwrapped_model,  # ← 使用unwrapped model
                         prompt_completion_ids,
                         attention_mask,
                         pixel_values,
