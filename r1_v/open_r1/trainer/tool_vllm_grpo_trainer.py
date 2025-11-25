@@ -852,74 +852,97 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
             sys.stdout.flush()
             
             # First, have main process load weights if needed
+            # ⚠️  Step 0跳过权重加载：VLLM初始化时已经加载了checkpoint
             if self.state.global_step != self._last_loaded_step:
-                print(f"⚙️ [Rank {self.accelerator.process_index}] 需要加载权重")
-                sys.stdout.flush()
-                with unwrap_model_for_generation(
-                    self.model,
-                    self.accelerator,
-                    gather_deepspeed3_params = False,  # TODO: fix this, self.args.ds3_gather_for_generation,
-                ) as unwrapped_model:
-                    if is_compiled_module(unwrapped_model):
-                        state_dict = unwrapped_model._orig_mod.state_dict()
-                    else:
-                        state_dict = unwrapped_model.state_dict()
-                
-                # 🔧 修复DeepSpeed与VLLM的兼容性：清理state_dict的key
-                # DeepSpeed可能添加"module."前缀或其他包装
-                # HuggingFace模型还有"model."前缀需要移除
-                if self.accelerator.is_main_process:
-                    cleaned_state_dict = {}
-                    removed_prefixes_count = {"module.": 0, "_orig_mod.": 0, "model.": 0}
+                if self.state.global_step == 0:
+                    # 第一步跳过，使用VLLM初始权重
+                    print(f"ℹ️  [Rank {self.accelerator.process_index}] Step 0: 跳过权重加载，使用VLLM初始权重")
+                    self._last_loaded_step = self.state.global_step
+                else:
+                    # 后续步骤：加载更新后的训练权重
+                    print(f"⚙️ [Rank {self.accelerator.process_index}] Step {self.state.global_step}: 需要加载更新的权重")
+                    sys.stdout.flush()
                     
-                    for key, value in state_dict.items():
-                        # 移除可能的前缀（注意顺序！）
-                        clean_key = key
-                        
-                        # 1. 先移除DeepSpeed的包装前缀
-                        if clean_key.startswith("module."):
-                            clean_key = clean_key[7:]  # 移除"module."
-                            removed_prefixes_count["module."] += 1
-                        if clean_key.startswith("_orig_mod."):
-                            clean_key = clean_key[10:]  # 移除"_orig_mod."
-                            removed_prefixes_count["_orig_mod."] += 1
-                        
-                        # 2. 再移除HuggingFace的"model."前缀（用于visual和language部分）
-                        if clean_key.startswith("model."):
-                            clean_key = clean_key[6:]  # 移除"model."
-                            removed_prefixes_count["model."] += 1
-                        
-                        cleaned_state_dict[clean_key] = value
-                    
-                    print(f"🔧 [Rank {self.accelerator.process_index}] 清理state_dict:")
-                    print(f"   原始keys: {len(state_dict)}")
-                    print(f"   清理后keys: {len(cleaned_state_dict)}")
-                    if removed_prefixes_count["module."] > 0:
-                        print(f"   移除了 {removed_prefixes_count['module.']} 个 'module.' 前缀")
-                    if removed_prefixes_count["_orig_mod."] > 0:
-                        print(f"   移除了 {removed_prefixes_count['_orig_mod.']} 个 '_orig_mod.' 前缀")
-                    if removed_prefixes_count["model."] > 0:
-                        print(f"   移除了 {removed_prefixes_count['model.']} 个 'model.' 前缀 (HuggingFace)")
-                    
-                    # 验证关键参数是否存在（这些是VLLM期望的key格式）
-                    critical_keys = ['visual.patch_embed.proj.weight', 'embed_tokens.weight', 'lm_head.weight']
-                    for ckey in critical_keys:
-                        if ckey in cleaned_state_dict:
-                            print(f"   ✅ 找到关键参数: {ckey}")
-                        else:
-                            # 搜索可能的匹配
-                            last_component = ckey.split('.')[-1]
-                            matching_keys = [k for k in cleaned_state_dict.keys() if last_component in k]
-                            if matching_keys:
-                                print(f"   ⚠️  未找到 {ckey}，但找到类似的: {matching_keys[:3]}")
+                    try:
+                        with unwrap_model_for_generation(
+                            self.model,
+                            self.accelerator,
+                            gather_deepspeed3_params = False,
+                        ) as unwrapped_model:
+                            if is_compiled_module(unwrapped_model):
+                                state_dict = unwrapped_model._orig_mod.state_dict()
                             else:
-                                print(f"   ❌ 未找到 {ckey} 及任何类似的参数")
-                    
-                    llm_model = (
-                        self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                    )
-                    llm_model.load_weights(cleaned_state_dict.items())
-                self._last_loaded_step = self.state.global_step
+                                state_dict = unwrapped_model.state_dict()
+                        
+                        if self.accelerator.is_main_process:
+                            # 🔧 修复DeepSpeed与VLLM的兼容性：清理state_dict的key
+                            cleaned_state_dict = {}
+                            
+                            # 打印前5个原始key用于调试
+                            print(f"🔍 [调试] 原始state_dict前5个keys:")
+                            for i, key in enumerate(list(state_dict.keys())[:5]):
+                                print(f"      {i+1}. {key}")
+                            
+                            for key, value in state_dict.items():
+                                clean_key = key
+                                
+                                # 移除所有可能的前缀
+                                # 顺序很重要！先移除外层包装
+                                while True:
+                                    original = clean_key
+                                    if clean_key.startswith("module."):
+                                        clean_key = clean_key[7:]
+                                    if clean_key.startswith("_orig_mod."):
+                                        clean_key = clean_key[10:]
+                                    if clean_key.startswith("model."):
+                                        clean_key = clean_key[6:]
+                                    # 如果没有变化，说明清理完了
+                                    if clean_key == original:
+                                        break
+                                
+                                cleaned_state_dict[clean_key] = value
+                            
+                            print(f"🔧 [Rank {self.accelerator.process_index}] 清理state_dict:")
+                            print(f"   原始keys: {len(state_dict)}")
+                            print(f"   清理后keys: {len(cleaned_state_dict)}")
+                            
+                            # 打印前5个清理后的key
+                            print(f"🔍 [调试] 清理后的前5个keys:")
+                            for i, key in enumerate(list(cleaned_state_dict.keys())[:5]):
+                                print(f"      {i+1}. {key}")
+                            
+                            # 验证关键参数
+                            critical_keys = ['visual.patch_embed.proj.weight', 'embed_tokens.weight', 'lm_head.weight']
+                            all_found = True
+                            for ckey in critical_keys:
+                                if ckey in cleaned_state_dict:
+                                    print(f"   ✅ 找到关键参数: {ckey}")
+                                else:
+                                    all_found = False
+                                    print(f"   ⚠️  未找到: {ckey}")
+                            
+                            if not all_found:
+                                print(f"   ⚠️  部分关键参数缺失，VLLM加载可能失败")
+                                print(f"   尝试加载，如果失败将使用旧权重...")
+                            
+                            try:
+                                llm_model = (
+                                    self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                                )
+                                llm_model.load_weights(cleaned_state_dict.items())
+                                print(f"   ✅ 权重加载成功")
+                            except Exception as load_err:
+                                print(f"   ⚠️  权重加载失败: {load_err}")
+                                print(f"   继续使用VLLM的旧权重进行生成")
+                        
+                        self._last_loaded_step = self.state.global_step
+                        
+                    except Exception as e:
+                        print(f"❌ [Rank {self.accelerator.process_index}] 权重处理失败: {e}")
+                        print(f"   继续使用VLLM现有权重")
+                        import traceback
+                        traceback.print_exc()
+                        self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
             import sys
