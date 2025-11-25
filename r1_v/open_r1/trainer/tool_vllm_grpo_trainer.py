@@ -875,19 +875,13 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                 state_dict = unwrapped_model.state_dict()
                         
                         if self.accelerator.is_main_process:
-                            # 🔧 修复DeepSpeed与VLLM的兼容性：清理state_dict的key
+                            # 🔧 清理state_dict的key（移除DDP/DeepSpeed/HuggingFace的包装前缀）
                             cleaned_state_dict = {}
-                            
-                            # 打印前5个原始key用于调试
-                            print(f"🔍 [调试] 原始state_dict前5个keys:")
-                            for i, key in enumerate(list(state_dict.keys())[:5]):
-                                print(f"      {i+1}. {key}")
                             
                             for key, value in state_dict.items():
                                 clean_key = key
                                 
-                                # 移除所有可能的前缀
-                                # 顺序很重要！先移除外层包装
+                                # 移除所有可能的前缀（module., _orig_mod., model.）
                                 while True:
                                     original = clean_key
                                     if clean_key.startswith("module."):
@@ -902,28 +896,7 @@ class Qwen2VLGRPOVLLMTrainer(Trainer):
                                 
                                 cleaned_state_dict[clean_key] = value
                             
-                            print(f"🔧 [Rank {self.accelerator.process_index}] 清理state_dict:")
-                            print(f"   原始keys: {len(state_dict)}")
-                            print(f"   清理后keys: {len(cleaned_state_dict)}")
-                            
-                            # 打印前5个清理后的key
-                            print(f"🔍 [调试] 清理后的前5个keys:")
-                            for i, key in enumerate(list(cleaned_state_dict.keys())[:5]):
-                                print(f"      {i+1}. {key}")
-                            
-                            # 验证关键参数
-                            critical_keys = ['visual.patch_embed.proj.weight', 'embed_tokens.weight', 'lm_head.weight']
-                            all_found = True
-                            for ckey in critical_keys:
-                                if ckey in cleaned_state_dict:
-                                    print(f"   ✅ 找到关键参数: {ckey}")
-                                else:
-                                    all_found = False
-                                    print(f"   ⚠️  未找到: {ckey}")
-                            
-                            if not all_found:
-                                print(f"   ⚠️  部分关键参数缺失，VLLM加载可能失败")
-                                print(f"   尝试加载，如果失败将使用旧权重...")
+                            print(f"⚙️  [Step {self.state.global_step}] 加载更新权重到VLLM ({len(cleaned_state_dict)} params)")
                             
                             try:
                                 llm_model = (
